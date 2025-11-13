@@ -19,6 +19,8 @@ return {
         map('K', vim.lsp.buf.hover, 'Hover')
         map('<leader>rn', vim.lsp.buf.rename, 'Rename')
         map('<leader>ca', vim.lsp.buf.code_action, 'Code Action')
+        map('[d', vim.diagnostic.goto_prev, 'Previous diagnostic')
+        map(']d', vim.diagnostic.goto_next, 'Next diagnostic')
       end,
     })
 
