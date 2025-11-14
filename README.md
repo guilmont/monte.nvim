@@ -50,8 +50,7 @@ nvim
 | `\` | Toggle file explorer (Neo-tree) |
 | `Ctrl+p` | Find files |
 | `Ctrl+b` | Find buffers |
-| `<leader>fg` | Grep search (live grep) |
-| `<leader>` is **Space** by default |
+| `Ctrl+g` | Grep search (live grep) |
 
 ### Cursor & Editing (VS Code-like)
 
