@@ -1,6 +1,5 @@
 -- VS Code-like cursor behavior and multicursor setup
--- - Move lines/blocks up/down with Alt+Up/Down
--- - Duplicate lines/blocks with Shift+Alt+Up/Down
+-- - Move lines/blocks up/down with Alt+Up/Down or Alt+j/k
 -- - Word-wise navigation with Ctrl+Left/Right
 -- - Word-wise delete with Ctrl+Backspace/Delete in insert mode
 -- - Multicursor with Ctrl+D (via vim-visual-multi)
@@ -15,55 +14,37 @@ return {
     vim.g.VM_maps = {
       ['Find Under'] = '<C-d>',
       ['Find Subword Under'] = '<C-d>',
-      ['Add Cursor Down'] = '<A-Down>',
-      ['Add Cursor Up'] = '<A-Up>',
       ['Skip Region'] = '<C-k>',
       ['Remove Region'] = '<C-x>',
     }
   end,
   config = function()
-    local function map(mode, lhs, rhs, opts)
-      local options = { silent = true }
-      if opts then options = vim.tbl_extend('force', options, opts) end
-      vim.keymap.set(mode, lhs, rhs, options)
+    local map = function(mode, lhs, rhs, desc)
+      vim.keymap.set(mode, lhs, rhs, { silent = true, desc = desc })
     end
 
-    map('n', '<A-Down>', ':m .+1<CR>==', { desc = 'Move line down' })
-    map('n', '<A-Up>', ':m .-2<CR>==', { desc = 'Move line up' })
-    map('i', '<A-Down>', '<Esc>:m .+1<CR>==gi', { desc = 'Move line down' })
-    map('i', '<A-Up>', '<Esc>:m .-2<CR>==gi', { desc = 'Move line up' })
-    map('v', '<A-Down>', ":m '>+1<CR>gv=gv", { desc = 'Move selection down' })
-    map('v', '<A-Up>', ":m '<-2<CR>gv=gv", { desc = 'Move selection up' })
+    -- Move lines/blocks up/down
+    local move_mappings = {
+      { keys = { '<M-Down>', '<M-j>' }, dir = 'down', offset = '.+1', voffset = "'>+1" },
+      { keys = { '<M-Up>', '<M-k>' }, dir = 'up', offset = '.-2', voffset = "'<-2" },
+    }
 
-    map('n', '<S-A-Down>', 'yyp', { desc = 'Duplicate line down' })
-    map('n', '<S-A-Up>', 'yyP', { desc = 'Duplicate line up' })
-    map('v', '<S-A-Down>', ":<C-u>'<,'>copy '><CR>gv", { desc = 'Duplicate selection down' })
-    map('v', '<S-A-Up>', ":<C-u>'<,'>copy '<-1<CR>gv", { desc = 'Duplicate selection up' })
-
-    map({ 'n', 'v' }, '<C-Left>', 'b', { desc = 'Word left' })
-    map({ 'n', 'v' }, '<C-Right>', 'w', { desc = 'Word right' })
-    map('i', '<C-Left>', '<C-o>b', { desc = 'Word left' })
-    map('i', '<C-Right>', '<C-o>w', { desc = 'Word right' })
-
-    map('i', '<C-Del>', '<C-o>dw', { desc = 'Delete next word' })
-    map('i', '<C-BS>', '<C-o>db', { desc = 'Delete previous word' })
-    map('i', '<C-Backspace>', '<C-o>db', { desc = 'Delete previous word' })
-
-    map({ 'n', 'i' }, '<M-j>', function()
-      if vim.fn.mode() == 'i' then
-        vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes('<Esc>:m .+1<CR>==gi', true, false, true), 'n', false)
-      else
-        vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes(':m .+1<CR>==', true, false, true), 'n', false)
+    for _, move in ipairs(move_mappings) do
+      for _, key in ipairs(move.keys) do
+        map('n', key, ':m ' .. move.offset .. '<CR>==', 'Move line ' .. move.dir)
+        map('i', key, '<Esc>:m ' .. move.offset .. '<CR>==gi', 'Move line ' .. move.dir)
+        map('v', key, ":m " .. move.voffset .. "<CR>gv=gv", 'Move selection ' .. move.dir)
       end
-    end, { desc = 'Move line down (Alt-j)' })
-    map({ 'n', 'i' }, '<M-k>', function()
-      if vim.fn.mode() == 'i' then
-        vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes('<Esc>:m .-2<CR>==gi', true, false, true), 'n', false)
-      else
-        vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes(':m .-2<CR>==', true, false, true), 'n', false)
-      end
-    end, { desc = 'Move line up (Alt-k)' })
-    map('v', '<M-j>', ":m '>+1<CR>gv=gv", { desc = 'Move selection down (Alt-j)' })
-    map('v', '<M-k>', ":m '<-2<CR>gv=gv", { desc = 'Move selection up (Alt-k)' })
+    end
+
+    -- Word-wise navigation
+    map({ 'n', 'v' }, '<C-Left>', 'b', 'Word left')
+    map({ 'n', 'v' }, '<C-Right>', 'w', 'Word right')
+    map('i', '<C-Left>', '<C-o>b', 'Word left')
+    map('i', '<C-Right>', '<C-o>w', 'Word right')
+
+    -- Word-wise delete in insert mode
+    map('i', '<C-Del>', '<C-o>dw', 'Delete next word')
+    map('i', '<C-BS>', '<C-o>db', 'Delete previous word')
   end,
 }
