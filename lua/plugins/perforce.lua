@@ -248,9 +248,88 @@ return {
       end
 
       -- Help line
-      table.insert(lines, '[Enter=diff | Tab=toggle shelf | e=edit | r=revert | s=shelve | u=unshelve | d=delete | m=move | N=new CL | q=close]')
+      table.insert(lines, '[Enter=diff | Tab=toggle shelf | e=edit | r=revert | s=shelve | u=unshelve | d=delete | m=move | N=new CL]')
 
       return lines, maps
+    end
+
+    local function apply_syntax_highlighting(buf)
+      -- Clear existing highlights
+      vim.api.nvim_buf_clear_namespace(buf, -1, 0, -1)
+
+      local ns_id = vim.api.nvim_create_namespace('P4Highlight')
+      local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
+
+      for i, line in ipairs(lines) do
+        local line_idx = i - 1
+
+        -- CL header lines
+        if line:match('^CL ') then
+          local cl_num_end = line:find(':')
+          if cl_num_end then
+            -- Highlight "CL <number>"
+            vim.api.nvim_buf_add_highlight(buf, ns_id, 'Title', line_idx, 0, cl_num_end - 1)
+
+            -- Highlight count
+            local count_match = line:match('%((%d+ file[s]?)%)')
+            if count_match then
+              local count_start = line:find('%(' .. count_match:gsub('([%^%$%(%)%%%.%[%]%*%+%-%?])', '%%%1'))
+              if count_start then
+                vim.api.nvim_buf_add_highlight(buf, ns_id, 'Number', line_idx, count_start - 1, count_start + #count_match + 1)
+              end
+            elseif line:match('%(empty%)') then
+              local empty_start = line:find('%(empty%)')
+              if empty_start then
+                vim.api.nvim_buf_add_highlight(buf, ns_id, 'Comment', line_idx, empty_start - 1, empty_start + 6)
+              end
+            end
+          end
+
+        -- Shelf toggle lines
+        elseif line:match('^%s+[▶▼] Shelf') then
+          local arrow_end = line:find('Shelf') - 1
+          vim.api.nvim_buf_add_highlight(buf, ns_id, 'Special', line_idx, 0, arrow_end)
+          local shelf_start = line:find('Shelf')
+          local paren_start = line:find('%(')
+          if shelf_start and paren_start then
+            vim.api.nvim_buf_add_highlight(buf, ns_id, 'Keyword', line_idx, shelf_start - 1, paren_start - 1)
+          end
+
+        -- Shelved file lines
+        elseif line:match('^%s%s%s%s[^%s]') and not line:match('^%s%s[^%s]') then
+          vim.api.nvim_buf_add_highlight(buf, ns_id, 'Directory', line_idx, 0, #line)
+
+        -- File action lines
+        elseif line:match('^%s%s[a-z]+%s+') then
+          local action = line:match('^%s%s([a-z]+)')
+          if action then
+            local hl_group
+            if action == 'edit' then
+              hl_group = 'DiffChange'
+            elseif action == 'add' then
+              hl_group = 'DiffAdd'
+            elseif action == 'delete' then
+              hl_group = 'DiffDelete'
+            elseif action == 'move/add' or action == 'move/delete' then
+              hl_group = 'DiffText'
+            else
+              hl_group = 'Identifier'
+            end
+
+            vim.api.nvim_buf_add_highlight(buf, ns_id, hl_group, line_idx, 2, 2 + #action)
+
+            -- Highlight the filename
+            local file_start = line:find('[^%s]', 12)
+            if file_start then
+              vim.api.nvim_buf_add_highlight(buf, ns_id, 'String', line_idx, file_start - 1, #line)
+            end
+          end
+
+        -- Help line
+        elseif line:match('^%[.*%]$') then
+          vim.api.nvim_buf_add_highlight(buf, ns_id, 'Comment', line_idx, 0, #line)
+        end
+      end
     end
 
     local function update_display()
@@ -266,6 +345,9 @@ return {
       vim.bo[State.window.buf].modifiable = false
 
       State.window.maps = maps
+
+      -- Apply syntax highlighting
+      apply_syntax_highlighting(State.window.buf)
 
       -- Restore cursor (clamped to valid range)
       local line_count = #lines
@@ -776,6 +858,9 @@ return {
       vim.bo[buf].modifiable = false
       State.window.maps = maps
 
+      -- Apply initial syntax highlighting
+      apply_syntax_highlighting(buf)
+
       -- Create window
       local width = math.floor(vim.o.columns * 0.9)
       local height = math.min(#lines + 2, math.floor(vim.o.lines * 0.9))
@@ -815,7 +900,9 @@ return {
       vim.keymap.set('n', 'm', Actions.move, vim.tbl_extend('force', opts, { desc = 'Move file' }))
       vim.keymap.set('v', 'm', Actions.move_visual, vim.tbl_extend('force', opts, { desc = 'Move files' }))
       vim.keymap.set('n', 'N', Actions.new_changelist, vim.tbl_extend('force', opts, { desc = 'New CL' }))
-      vim.keymap.set('n', 'q', function() vim.api.nvim_win_close(win, true) end, vim.tbl_extend('force', opts, { desc = 'Close' }))
+      for _, key in ipairs({'q', '<Esc>'}) do
+          vim.keymap.set('n', key, function() vim.api.nvim_win_close(win, true) end, vim.tbl_extend('force', opts, { desc = 'Close' }))
+      end
     end
 
     -- ============================================================================
