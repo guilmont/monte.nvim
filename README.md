@@ -40,7 +40,7 @@ nvim
 
 ### First-time Setup
 
-1. **LSP servers install automatically** on first launch
+1. **Install LSP servers**: Run `:Mason` and install desired servers (e.g., `clangd`, `lua_ls`, `pyright`)
 2. **Set up Copilot**: Run `:Copilot setup` and follow the authentication flow
 3. **That's it!** Start coding
 
@@ -73,15 +73,33 @@ nvim
 
 ### LSP (Code Intelligence)
 
+#### Main LSP Namespace (`<leader>l`)
+
 | Mode | Key | Action |
 |------|-----|--------|
-| `n` | `gd` | Go to definition |
-| `n` | `gr` | Find references |
-| `n` | `K` | Show hover documentation |
-| `n` | `<leader>rn` | Rename symbol |
-| `n` | `<leader>ca` | Code actions |
-| `n` | `]d` | Next diagnostic |
-| `n` | `[d` | Previous diagnostic |
+| `n` | `<leader>ld` | Goto Definition |
+| `n` | `<leader>lD` | Goto Declaration |
+| `n` | `<leader>lr` | References |
+| `n` | `<leader>li` | Goto Implementation |
+| `n` | `<leader>lh` | Hover |
+| `n` | `<leader>ls` | Signature Help |
+| `n` | `<leader>lR` | Rename |
+| `n` | `<leader>la` | Code Action |
+| `n` | `<leader>lf` | Format Buffer |
+| `n` | `<leader>lS` | Workspace Symbols |
+| `n` | `<leader>lx` | Line Diagnostics |
+| `n` | `<leader>lX` | Restart LSP Clients |
+| `n` | `<leader>lH` | Toggle Inlay Hints |
+| `n` | `[d` | Previous Diagnostic |
+| `n` | `]d` | Next Diagnostic |
+
+#### Workspace Folders
+
+| Mode | Key | Action |
+|------|-----|--------|
+| `n` | `<leader>lwA` | Add Workspace Folder |
+| `n` | `<leader>lwR` | Remove Workspace Folder |
+| `n` | `<leader>lwl` | List Workspace Folders |
 
 ### Completion
 
@@ -219,18 +237,20 @@ Edit `lua/plugins/colors.lua` and change `carbonfox` to another nightfox variant
 
 ### Add More LSP Servers
 
-Edit `lua/plugins/lsp.lua` and add to the `servers` table:
+**No code editing needed!** Simply:
+
+1. Run `:Mason`
+2. Navigate to the server you want (e.g., `gopls`, `rust_analyzer`, `clangd`)
+3. Press `i` to install
+4. Run `:LspSetupInstalled` or restart Neovim
+
+To customize a server's settings, edit the `server_overrides` table in `lua/plugins/lsp.lua`:
 
 ```lua
-local servers = {
-  clangd = {},
-  rust_analyzer = {},
-  pyright = {},
-  ts_ls = {},
+local server_overrides = {
   lua_ls = { settings = { Lua = { completion = { callSnippet = 'Replace' } } } },
-  -- Add your server here:
-  gopls = {},  -- Go
-  -- etc.
+  -- Add custom settings for other servers:
+  clangd = { cmd = { 'clangd', '--background-index' } },
 }
 ```
 
@@ -248,8 +268,9 @@ The Perforce integration works with your existing P4 environment. Make sure you 
 ## 🐛 Troubleshooting
 
 **LSP not working?**
-- Check `:Mason` to see if servers are installed
-- Run `:LspInfo` in a file to check LSP status
+- Install servers via `:Mason` UI (not by editing config files)
+- After installing a server, run `:LspSetupInstalled` or restart Neovim
+- Check `:LspInfo` in a file to verify LSP status
 
 **Copilot not suggesting?**
 - Run `:Copilot status` to check authentication
