@@ -248,7 +248,7 @@ return {
       end
 
       -- Help line
-      table.insert(lines, '[Enter=diff | Tab=toggle shelf | e=edit | r=revert | s=shelve | u=unshelve | d=delete | m=move | N=new CL]')
+      table.insert(lines, '[Enter=open/edit/toggle | d=diff | r=revert | m=move | s=shelve | u=unshelve | D=delete | N=new CL]')
 
       return lines, maps
     end
@@ -489,10 +489,15 @@ return {
 
     function Actions.edit()
       local line = vim.api.nvim_win_get_cursor(State.window.win)[1]
+      local shelf_toggle = State.window.maps.shelf_toggle[line]
       local cl_info = State.window.maps.cl[line]
       local file = State.window.maps.file[line]
 
-      if cl_info then
+      -- Toggle shelf if on shelf line
+      if shelf_toggle then
+        State.shelf_expanded[shelf_toggle.cl] = not State.shelf_expanded[shelf_toggle.cl]
+        update_display()
+      elseif cl_info then
         -- Edit CL description via input
         local current_desc = cl_info.desc
         vim.ui.input({
@@ -890,13 +895,12 @@ return {
 
       -- Keymaps
       local opts = { buffer = buf, noremap = true, silent = true }
-      vim.keymap.set('n', '<CR>', Actions.show_diff, vim.tbl_extend('force', opts, { desc = 'Show diff' }))
-      vim.keymap.set('n', '<Tab>', Actions.toggle_shelf, vim.tbl_extend('force', opts, { desc = 'Toggle shelf' }))
-      vim.keymap.set('n', 'e', Actions.edit, vim.tbl_extend('force', opts, { desc = 'Edit CL/file' }))
+      vim.keymap.set('n', '<CR>', Actions.edit, vim.tbl_extend('force', opts, { desc = 'Open/Edit/Toggle' }))
+      vim.keymap.set('n', 'd', Actions.show_diff, vim.tbl_extend('force', opts, { desc = 'Show diff' }))
       vim.keymap.set('n', 'r', Actions.revert, vim.tbl_extend('force', opts, { desc = 'Revert' }))
       vim.keymap.set('n', 's', Actions.shelve, vim.tbl_extend('force', opts, { desc = 'Shelve' }))
       vim.keymap.set('n', 'u', Actions.unshelve, vim.tbl_extend('force', opts, { desc = 'Unshelve' }))
-      vim.keymap.set('n', 'd', Actions.delete, vim.tbl_extend('force', opts, { desc = 'Delete' }))
+      vim.keymap.set('n', 'D', Actions.delete, vim.tbl_extend('force', opts, { desc = 'Delete' }))
       vim.keymap.set('n', 'm', Actions.move, vim.tbl_extend('force', opts, { desc = 'Move file' }))
       vim.keymap.set('v', 'm', Actions.move_visual, vim.tbl_extend('force', opts, { desc = 'Move files' }))
       vim.keymap.set('n', 'N', Actions.new_changelist, vim.tbl_extend('force', opts, { desc = 'New CL' }))
