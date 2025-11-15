@@ -474,7 +474,7 @@ return {
       local line = vim.api.nvim_win_get_cursor(State.window.win)[1]
       local file = State.window.maps.file[line]
       if file then
-        M.show_diff(file.local_path)
+        M.vdiffsplit(file.local_path)
       end
     end
 
@@ -898,11 +898,10 @@ return {
       vim.keymap.set('n', '<CR>', Actions.edit, vim.tbl_extend('force', opts, { desc = 'Open/Edit/Toggle' }))
       vim.keymap.set('n', 'd', Actions.show_diff, vim.tbl_extend('force', opts, { desc = 'Show diff' }))
       vim.keymap.set('n', 'r', Actions.revert, vim.tbl_extend('force', opts, { desc = 'Revert' }))
+      vim.keymap.set('n', 'm', Actions.move, vim.tbl_extend('force', opts, { desc = 'Move file' }))
       vim.keymap.set('n', 's', Actions.shelve, vim.tbl_extend('force', opts, { desc = 'Shelve' }))
       vim.keymap.set('n', 'u', Actions.unshelve, vim.tbl_extend('force', opts, { desc = 'Unshelve' }))
       vim.keymap.set('n', 'D', Actions.delete, vim.tbl_extend('force', opts, { desc = 'Delete' }))
-      vim.keymap.set('n', 'm', Actions.move, vim.tbl_extend('force', opts, { desc = 'Move file' }))
-      vim.keymap.set('v', 'm', Actions.move_visual, vim.tbl_extend('force', opts, { desc = 'Move files' }))
       vim.keymap.set('n', 'N', Actions.new_changelist, vim.tbl_extend('force', opts, { desc = 'New CL' }))
       for _, key in ipairs({'q', '<Esc>'}) do
           vim.keymap.set('n', key, function() vim.api.nvim_win_close(win, true) end, vim.tbl_extend('force', opts, { desc = 'Close' }))
@@ -981,157 +980,105 @@ return {
       end
     end
 
-    function M.show_diff(file)
+    -- Gvdiffsplit-like view: left = depot have, right = real file buffer
+    function M.vdiffsplit(file)
       file = file or vim.fn.expand('%:p')
-
-      local diff_output = p4_cmd('diff ' .. vim.fn.shellescape(file))
-      if not diff_output or #diff_output == 0 then
-        vim.notify('No changes in ' .. vim.fn.fnamemodify(file, ':t'), vim.log.levels.INFO)
-        return
-      end
-
-      local depot_content = p4_cmd('print -q ' .. vim.fn.shellescape(file))
-      if not depot_content then
-        vim.notify('Failed to get depot content', vim.log.levels.ERROR)
-        return
-      end
-
-      local current_content = vim.fn.readfile(file)
-
-      -- Detect filetype from the file extension
-      local filetype = vim.filetype.match({ filename = file }) or ''
-
-      -- Clean up any existing diff buffers with same names
-      local filename = vim.fn.fnamemodify(file, ':t')
-      local depot_name = 'P4 Depot: ' .. filename
-      local local_name = 'Local: ' .. filename
-
-      for _, buf in ipairs(vim.api.nvim_list_bufs()) do
-        if vim.api.nvim_buf_is_valid(buf) then
-          local buf_name = vim.api.nvim_buf_get_name(buf)
-          -- Clean up old diff buffers and any buffer with the same file path
-          if buf_name == depot_name or buf_name == local_name or buf_name == file then
-            pcall(vim.api.nvim_buf_delete, buf, { force = true })
-          end
+      -- Get depot info for #have
+      local fstat = p4_cmd('-ztag fstat -T depotFile,haveRev,action ' .. vim.fn.shellescape(file))
+      local depot_file, have_rev, action
+      if fstat then
+        for _, line in ipairs(fstat) do
+          local df = line:match('^%.%.%s+depotFile%s+(.+)$')
+          if df then depot_file = df end
+          local hr = line:match('^%.%.%s+haveRev%s+(%d+)$')
+          if hr then have_rev = hr end
+          local ac = line:match('^%.%.%s+action%s+(.+)$')
+          if ac then action = ac end
         end
       end
 
-      local left_buf = vim.api.nvim_create_buf(false, true)
-      local right_buf = vim.api.nvim_create_buf(false, true)
+      -- Build left buffer content (depot #have, empty for add)
+      local depot_content = {}
+      if action == 'add' then
+        depot_content = {}
+      else
+        local target = depot_file and (depot_file .. (have_rev and ('#' .. have_rev) or '')) or file
+        depot_content = p4_cmd('print -q ' .. vim.fn.shellescape(target)) or {}
+      end
 
-      vim.api.nvim_buf_set_lines(left_buf, 0, -1, false, depot_content or {})
-      vim.api.nvim_buf_set_lines(right_buf, 0, -1, false, current_content)
-
-      vim.bo[left_buf].filetype = filetype
-      vim.bo[right_buf].filetype = filetype
-      vim.bo[left_buf].buftype = 'nofile'
-      vim.bo[right_buf].buftype = 'nofile'
-      vim.bo[left_buf].bufhidden = 'wipe'
-      vim.bo[right_buf].bufhidden = 'wipe'
-      vim.api.nvim_buf_set_name(left_buf, depot_name)
-      vim.api.nvim_buf_set_name(right_buf, local_name)
-
-      -- Close P4 window if it's open
+      -- If invoked from the P4 window, close it and edit the file
       if State.window.win and vim.api.nvim_win_is_valid(State.window.win) then
         vim.api.nvim_win_close(State.window.win, true)
       end
 
-      -- Open diff in a new tab to avoid layout issues
-      vim.cmd('tabnew')
+      -- Ensure the local file is the current buffer (like Gvdiffsplit)
+      if vim.fn.expand('%:p') ~= file then
+        vim.cmd('edit ' .. vim.fn.fnameescape(file))
+      end
 
+      local local_win = vim.api.nvim_get_current_win()
+      local local_buf = vim.api.nvim_get_current_buf()
+
+      -- Create scratch buffer for depot side
+      local left_buf = vim.api.nvim_create_buf(false, true)
+      local ft = vim.filetype.match({ filename = file }) or ''
+      vim.bo[left_buf].filetype = ft
+      vim.bo[left_buf].buftype = 'nofile'
+      vim.bo[left_buf].bufhidden = 'wipe'
+      vim.api.nvim_buf_set_name(left_buf, (depot_file or 'P4 Depot') .. (have_rev and ('#' .. have_rev) or ''))
+      vim.api.nvim_buf_set_lines(left_buf, 0, -1, false, depot_content)
+
+      -- Open vertical split to the LEFT of the file window (keeps sidebars leftmost)
+      vim.api.nvim_set_current_win(local_win)
+      vim.cmd('leftabove vsplit')
       local left_win = vim.api.nvim_get_current_win()
       vim.api.nvim_win_set_buf(left_win, left_buf)
 
-      vim.cmd('vsplit')
-      vim.cmd('wincmd l')
-      local right_win = vim.api.nvim_get_current_win()
-      vim.api.nvim_win_set_buf(right_win, right_buf)
-
+      -- Enable diff mode on both, with common navigation
       vim.api.nvim_win_call(left_win, function() vim.cmd('diffthis') end)
-      vim.api.nvim_win_call(right_win, function() vim.cmd('diffthis') end)
-
+      vim.api.nvim_win_call(local_win, function() vim.cmd('diffthis') end)
       vim.wo[left_win].scrollbind = true
-      vim.wo[right_win].scrollbind = true
+      vim.wo[local_win].scrollbind = true
       vim.wo[left_win].cursorbind = true
-      vim.wo[right_win].cursorbind = true
+      vim.wo[local_win].cursorbind = true
 
-      local close_both = function()
-        -- Delete buffers to ensure cleanup
-        pcall(vim.api.nvim_buf_delete, left_buf, { force = true })
-        pcall(vim.api.nvim_buf_delete, right_buf, { force = true })
+      -- Optional helpers similar to Gvdiffsplit experience
+      for _, buf in ipairs({left_buf, local_buf}) do
+        vim.keymap.set('n', ']c', function() vim.cmd('normal! ]c') end, { buffer = buf, noremap = true, silent = true, desc = 'Next change' })
+        vim.keymap.set('n', '[c', function() vim.cmd('normal! [c') end, { buffer = buf, noremap = true, silent = true, desc = 'Previous change' })
+      end
 
-        -- Close the tab if there are multiple tabs, otherwise just close windows
-        if vim.fn.tabpagenr('$') > 1 then
-          vim.cmd('tabclose')
-        else
+      -- Close helper: leave the real buffer, wipe the depot buffer, stop diff
+      local function close_diff()
+        pcall(vim.api.nvim_win_call, local_win, function() vim.cmd('diffoff') end)
+        pcall(vim.api.nvim_win_call, left_win, function() vim.cmd('diffoff') end)
+        if vim.api.nvim_buf_is_valid(left_buf) then
+          pcall(vim.api.nvim_buf_delete, left_buf, { force = true })
+        end
+        if vim.api.nvim_win_is_valid(left_win) then
           pcall(vim.api.nvim_win_close, left_win, true)
-          pcall(vim.api.nvim_win_close, right_win, true)
+        end
+        if vim.api.nvim_win_is_valid(local_win) then
+          vim.api.nvim_set_current_win(local_win)
         end
       end
 
-      -- Auto-close both windows when either is closed
+      -- Auto-clean depot buffer when its window closes
       vim.api.nvim_create_autocmd('WinClosed', {
         callback = function(args)
-          local closed_win = tonumber(args.match)
-          if closed_win == left_win or closed_win == right_win then
-            vim.schedule(function()
-              close_both()
-            end)
+          local closed = tonumber(args.match)
+          if closed == left_win then
+            vim.schedule(close_diff)
           end
         end,
         once = true,
       })
 
-      local revert_hunk = function()
-        -- Revert current hunk to depot version (diffget from left to right)
-        vim.api.nvim_set_current_win(right_win)
-        vim.cmd('diffget')
+      -- Map q to close the diff from either side
+      for _, win in ipairs({left_win, local_win}) do
+        local buf = vim.api.nvim_win_get_buf(win)
+        vim.keymap.set('n', 'q', close_diff, { buffer = buf, noremap = true, silent = true, desc = 'Close P4 diff' })
       end
-
-      local save_file = function()
-        -- Save the right buffer (local file)
-        vim.api.nvim_win_call(right_win, function()
-          local lines = vim.api.nvim_buf_get_lines(right_buf, 0, -1, false)
-          vim.fn.writefile(lines, file)
-        end)
-        vim.notify('Saved changes to ' .. vim.fn.fnamemodify(file, ':t'), vim.log.levels.INFO)
-      end
-
-      -- Keymaps - focus on reverting changes
-      for _, buf in ipairs({left_buf, right_buf}) do
-        vim.keymap.set('n', 'u', revert_hunk, { buffer = buf, noremap = true, silent = true, desc = 'Revert hunk' })
-        vim.keymap.set('n', ']c', function() vim.cmd('normal! ]c') end, { buffer = buf, noremap = true, silent = true, desc = 'Next change' })
-        vim.keymap.set('n', '[c', function() vim.cmd('normal! [c') end, { buffer = buf, noremap = true, silent = true, desc = 'Previous change' })
-      end
-
-      -- Make right buffer writable and set up save commands
-      vim.api.nvim_buf_call(right_buf, function()
-        vim.bo.buftype = ''  -- Remove nofile buftype to allow writing
-        vim.bo.modifiable = true
-        vim.bo.modified = false  -- Mark as not modified initially
-
-        -- Don't use the actual file name to avoid "overwrite?" prompts
-        -- BufWriteCmd will handle the actual writing
-
-        -- Set up autocommand to handle writes
-        vim.api.nvim_create_autocmd('BufWriteCmd', {
-          buffer = right_buf,
-          callback = function()
-            save_file()
-            vim.bo[right_buf].modified = false
-            return true
-          end,
-        })
-
-        -- Override wq to save and close
-        vim.api.nvim_buf_create_user_command(right_buf, 'Wq', function()
-          save_file()
-          vim.bo[right_buf].modified = false
-          close_both()
-        end, {})
-      end)
-
-      vim.api.nvim_set_current_win(right_win)
     end
 
     -- ============================================================================
@@ -1144,7 +1091,7 @@ return {
     vim.api.nvim_create_user_command('P4Delete', function() M.delete() end, {})
     vim.api.nvim_create_user_command('P4Move', function() M.move() end, {})
     vim.api.nvim_create_user_command('P4Opened', M.show_opened, {})
-    vim.api.nvim_create_user_command('P4Diff', function() M.show_diff(vim.fn.expand('%:p')) end, {})
+    vim.api.nvim_create_user_command('P4Diff', function() M.vdiffsplit(vim.fn.expand('%:p')) end, {})
 
     -- Keymaps
     vim.keymap.set('n', '<leader>pe', M.edit, { desc = 'P4: Edit current file' })
@@ -1152,7 +1099,7 @@ return {
     vim.keymap.set('n', '<leader>pr', M.revert, { desc = 'P4: Revert current file' })
     vim.keymap.set('n', '<leader>px', function() M.delete() end, { desc = 'P4: Delete current file' })
     vim.keymap.set('n', '<leader>pm', function() M.move() end, { desc = 'P4: Move/rename current file' })
-    vim.keymap.set('n', '<leader>po', M.show_opened, { desc = 'P4: Show opened files' })
-    vim.keymap.set('n', '<leader>pd', function() M.show_diff(vim.fn.expand('%:p')) end, { desc = 'P4: Diff current file' })
+    vim.keymap.set('n', '<leader>ps', M.show_opened, { desc = 'P4: Show opened files' })
+    vim.keymap.set('n', '<leader>pd', function() M.vdiffsplit(vim.fn.expand('%:p')) end, { desc = 'P4: Diff current file' })
   end,
 }
