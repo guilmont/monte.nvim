@@ -64,10 +64,10 @@ nvim
 |------|-----|--------|
 | `n` `i` `v` | `Alt+j` / `Alt+↓` | Move line/block down |
 | `n` `i` `v` | `Alt+k` / `Alt+↑` | Move line/block up |
-| `n` `v` | `Ctrl+→` | Jump word forward |
-| `n` `v` | `Ctrl+←` | Jump word backward |
-| `i` | `Ctrl+Backspace` | Delete word backward |
-| `i` | `Ctrl+Delete` | Delete word forward |
+| `n` `v` | `Alt+→` | Jump word forward |
+| `n` `v` | `Alt+←` | Jump word backward |
+| `i` | `Alt+Backspace` | Delete word backward |
+| `i` | `Alt+Delete` | Delete word forward |
 | `n` | `gg` | Go to top of file |
 | `n` | `G` | Go to bottom of file |
 
@@ -105,11 +105,11 @@ nvim
 
 | Mode | Key | Action |
 |------|-----|--------|
-| `i` | `Ctrl+Space` | Trigger completion |
+| `i` | `Ctrl+Space` | Trigger completion (manual) |
 | `i` | `Enter` | Confirm selection |
-| `i` | `Tab` | Next item (or accept Copilot) |
-| `i` | `Shift+Tab` | Previous item |
-| `i` | `Ctrl+e` | Abort completion (or dismiss Copilot) |
+| `i` | `j` / `k` | Next / previous item |
+
+Tip: `Tab` is used to accept GitHub Copilot suggestions in this setup.
 
 ### GitHub Copilot
 
@@ -198,9 +198,10 @@ Examples:
 │   ├── config/
 │   │   ├── options.lua       # Vim options and settings
 │   │   ├── keymaps.lua       # Core keymaps (VS Code-like)
-│   │   ├── autocmds.lua      # Autocommands (yank highlight)
-│   │   ├── perforce.lua      # Perforce integration
-│   │   └── run.lua           # Async command runner
+│   │   └── autocmds.lua      # Autocommands (yank highlight)
+│   ├── custom/
+│   │   ├── perforce.lua      # Perforce integration (homemade plugin)
+│   │   └── run.lua           # Async command runner (homemade plugin)
 │   └── plugins/
 │       ├── colors.lua        # Theme (Carbonfox)
 │       ├── completion.lua    # nvim-cmp setup
@@ -256,7 +257,7 @@ local server_overrides = {
 
 ### Adjust Command Runner Output Width
 
-Edit `lua/config/run.lua` and change the `60` in `nvim_win_set_width(win, 60)` to your preferred width.
+Edit `lua/custom/run.lua` and change the `60` in `nvim_win_set_width(win, 60)` to your preferred width.
 
 ### Configure Perforce Client
 
