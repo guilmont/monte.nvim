@@ -12,4 +12,9 @@ return {
     { '\\', ':Neotree reveal<CR>', desc = 'NeoTree reveal', silent = true },
     { '<C-\\>', ':Neotree close<CR>', desc = 'NeoTree close', silent = true },
   },
+  opts = {
+    filesystem = {
+      use_libuv_file_watcher = true,
+    },
+  },
 }

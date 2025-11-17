@@ -9,12 +9,14 @@ return {
   config = function()
     local cmp = require 'cmp'
     cmp.setup {
+            completion = {
+              autocomplete = false,  -- Only show completion on manual trigger
+            },
       mapping = cmp.mapping.preset.insert({
         ['<C-Space>'] = cmp.mapping.complete(),
         ['<CR>'] = cmp.mapping.confirm({ select = true }),
-        ['<C-e>'] = cmp.mapping.abort(),
-        ['<Tab>'] = cmp.mapping.select_next_item(),
-        ['<S-Tab>'] = cmp.mapping.select_prev_item(),
+        ['j'] = cmp.mapping.select_next_item(),
+        ['k'] = cmp.mapping.select_prev_item(),
       }),
       sources = {
         { name = 'nvim_lsp' },

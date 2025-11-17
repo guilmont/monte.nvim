@@ -12,8 +12,8 @@ require('config.keymaps')
 require('config.autocmds')
 
 -- Load custom feature modules
-require('config.perforce')
-require('config.run')
+require('custom.perforce')
+require('custom.run')
 
 -- Bootstrap lazy.nvim if not installed
 local lazypath = vim.fn.stdpath 'data' .. '/lazy/lazy.nvim'
