@@ -196,7 +196,7 @@ end
 ---@return number buf Buffer handle
 ---@return number win Window handle
 local function create_output_window()
-  local buf = vim.api.nvim_create_buf(false, true)
+  local buf = vim.api.nvim_create_buf(true, true)
   vim.bo[buf].buftype = 'nofile'
   vim.bo[buf].bufhidden = 'hide'
   vim.bo[buf].swapfile = false
