@@ -106,6 +106,9 @@ local function goto_prev_location()
   end
 end
 
+-- Forward declaration for recompile (used in setup_keymaps)
+local recompile
+
 --- Find existing buffer for a file path
 ---@param filepath string
 ---@return number|nil bufnr
@@ -202,7 +205,6 @@ local function create_output_window()
   vim.cmd('botright vsplit')
   local win = vim.api.nvim_get_current_win()
   vim.api.nvim_win_set_buf(win, buf)
-  vim.api.nvim_win_set_width(win, 60)
 
   setup_syntax(buf)
   setup_keymaps(buf)
@@ -228,7 +230,6 @@ local function prepare_window()
     vim.cmd('botright vsplit')
     state.win = vim.api.nvim_get_current_win()
     vim.api.nvim_win_set_buf(state.win, state.buf)
-    vim.api.nvim_win_set_width(state.win, 60)
   else
     state.win = wins[1]
   end
@@ -312,7 +313,7 @@ local function run_command(cmd)
 end
 
 --- Recompile - run the last command again
-local function recompile()
+recompile = function()
   if state.last_cmd then
     run_command(state.last_cmd)
   else
