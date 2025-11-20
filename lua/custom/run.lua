@@ -251,7 +251,8 @@ local function append_output(lines)
 
     for _, line in ipairs(lines) do
       if line ~= '' then
-        vim.api.nvim_buf_set_lines(state.buf, -1, -1, false, { line })
+        local clean_line = strip_ansi(line)
+        vim.api.nvim_buf_set_lines(state.buf, -1, -1, false, { clean_line })
       end
     end
 
