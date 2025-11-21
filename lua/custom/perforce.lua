@@ -635,15 +635,27 @@ local function revert_files()
   -- Revert single file
   if data.type == 'opened_file' then
     local file = data.opened_file
-    p4_cmd('revert ', file.depot_path)
-    vim.cmd('checktime') -- Refresh file in editor if open
-    update_display(true)
+    vim.ui.input(
+      { prompt = 'Revert ' .. file.relative_path .. '? (y/N): ' },
+      function(input)
+        if not (input and input:lower() == 'y') then return end
+        p4_cmd('revert ', file.depot_path)
+        vim.cmd('checktime') -- Refresh file in editor if open
+        update_display(true)
+      end
+    )
   -- Revert entire changelist
   elseif data.type == 'changelist' then
     local cn = data.change_number
-    vim.cmd('checktime') -- Refresh files in editor if open
-    p4_cmd('revert -c ' .. cn .. ' //...')
-    update_display(true)
+    vim.ui.input(
+      { prompt = 'Revert all files in changelist ' .. cn .. '? (y/N): ' },
+      function(input)
+        if not (input and input:lower() == 'y') then return end
+        vim.cmd('checktime') -- Refresh files in editor if open
+        p4_cmd('revert -c ' .. cn .. ' //...')
+        update_display(true)
+      end
+    )
   end
 end
 
@@ -735,14 +747,26 @@ local function delete_stuff()
   elseif data.type == 'shelved_file' then
     local cn = data.change_number
     local depot_path = data.shelved_file
-    p4_cmd('shelve -d -c ' .. cn .. ' ', depot_path)
-    update_display(true)
+    vim.ui.input(
+      { prompt = 'Delete shelved file ' .. depot_path .. ' from CL ' .. cn .. '? (y/N): ' },
+      function(input)
+        if not (input and input:lower() == 'y') then return end
+        p4_cmd('shelve -d -c ' .. cn .. ' ', depot_path)
+        update_display(true)
+      end
+    )
 
   -- Delete all the shelved files in a changelist
   elseif data.type == 'shelf_toggle' then
-    vim.notify('Deleting all shelved files in changelist ' .. data.change_number, vim.log.levels.INFO)
-    p4_cmd('shelve -d -c ' .. data.change_number)
-    update_display(true)
+    local cn = data.change_number
+    vim.ui.input(
+      { prompt = 'Delete all shelved files in changelist ' .. cn .. '? (y/N): ' },
+      function(input)
+        if not (input and input:lower() == 'y') then return end
+        p4_cmd('shelve -d -c ' .. cn)
+        update_display(true)
+      end
+    )
   end
 end
 
