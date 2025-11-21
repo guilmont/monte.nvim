@@ -17,7 +17,7 @@ local function url_encode(str)
 end
 
 -- Run a p4 command and return output lines or error
-local function p4_cmd(args, filepath, newpath)
+local function p4_cmd(args, filepath, newpath, revision)
   -- If filepath is given, encode it
   if filepath then
     args = args .. ' ' .. url_encode(vim.fn.shellescape(filepath))
@@ -27,7 +27,12 @@ local function p4_cmd(args, filepath, newpath)
   if newpath then
     args = args .. ' ' .. url_encode(vim.fn.shellescape(newpath))
   end
+  -- If revision is given, append it
+  if revision then
+    args = args .. '#' .. revision
+  end
   -- Run command
+  vim.schedule(function() vim.print('Running: p4 ' .. args) end)
   local result = vim.fn.systemlist('p4 ' .. args)
   if vim.v.shell_error ~= 0 then
     error('\nP4 error:\n ' .. table.concat(result, '\n '))
@@ -109,28 +114,32 @@ end
 -- Gvdiffsplit-like view: left = depot have, right = real file buffer
 local function p4_vdiffsplit(file)
   -- Get depot info for #have
-  local depot_file, have_rev, action
-  local fstat = p4_cmd('-ztag fstat -T depotFile,haveRev,action ', file)
+  local depot_file, have_rev, action, moved_file
+  local fstat = p4_cmd('fstat ', file)
   if fstat then
     for _, line in ipairs(fstat) do
-      local df = line:match('^%.%.%s+depotFile%s+(.+)$')
+      local df = line:match('^%.%.%. depotFile (.+)$')
       if df then depot_file = df end
-      local hr = line:match('^%.%.%s+haveRev%s+(%d+)$')
+      local hr = line:match('^%.%.%. haveRev (%d+)$')
       if hr then have_rev = hr end
-      local ac = line:match('^%.%.%s+action%s+(.+)$')
+      local ac = line:match('^%.%.%. action (.+)$')
       if ac then action = ac end
+      local mf = line:match('^%.%.%. movedFile (.+)$')
+      if mf then moved_file = mf end
     end
   else
     error('Failed to get file info from Perforce for ' .. file)
   end
-
   -- Build left buffer content (depot #have, empty for add)
   local depot_content = {}
   if action == 'add' then
     depot_content = {}
+  elseif action == 'move/add' then
+    -- For move/add, get content from movedFile at #have
+    depot_content = p4_cmd('print -q ', moved_file, nil, have_rev)
   else
-    local target = depot_file and (depot_file .. (have_rev and ('#' .. have_rev) or '')) or file
-    depot_content = p4_cmd('print -q ', target) or {}
+    -- For edit
+    depot_content = p4_cmd('print -q ', depot_file, nil, have_rev)
   end
 
   -- Ensure the local file is the current buffer (like Gvdiffsplit)
