@@ -38,7 +38,6 @@ local function p4_cmd(args)
   end
 
   -- Run command
-  vim.schedule(function() vim.print('Running: ' .. cmd) end)
   local result = vim.fn.systemlist(cmd)
   if vim.v.shell_error ~= 0 then
     error('\nP4 error:\n ' .. table.concat(result, '\n '))
