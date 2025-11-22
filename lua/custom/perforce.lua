@@ -17,23 +17,29 @@ local function url_encode(str)
 end
 
 -- Run a p4 command and return output lines or error
-local function p4_cmd(args, filepath, newpath, revision)
-  -- If filepath is given, encode it
-  if filepath then
-    args = args .. ' ' .. url_encode(vim.fn.shellescape(filepath))
+local function p4_cmd(args)
+  if not args or args == '' or not args.cmd or args.cmd == '' then
+    error('No p4 command given')
   end
-  -- If newpath is given, encode it
-  -- Used for move/rename
-  if newpath then
-    args = args .. ' ' .. url_encode(vim.fn.shellescape(newpath))
+
+  -- Construct local command
+  local cmd = 'p4 ' .. args.cmd
+  -- If filepath is given, encode it
+  if args.filepath then
+    cmd = cmd .. ' ' .. url_encode(vim.fn.shellescape(args.filepath))
+  end
+  -- If newpath is given for move/rename, encode it
+  if args.newpath then
+    cmd = cmd .. ' ' .. url_encode(vim.fn.shellescape(args.newpath))
   end
   -- If revision is given, append it
-  if revision then
-    args = args .. '#' .. revision
+  if args.revision then
+    cmd = cmd .. '#' .. args.revision
   end
+
   -- Run command
-  vim.schedule(function() vim.print('Running: p4 ' .. args) end)
-  local result = vim.fn.systemlist('p4 ' .. args)
+  vim.schedule(function() vim.print('Running: ' .. cmd) end)
+  local result = vim.fn.systemlist(cmd)
   if vim.v.shell_error ~= 0 then
     error('\nP4 error:\n ' .. table.concat(result, '\n '))
   end
@@ -46,7 +52,7 @@ end
 
 local function p4_edit()
   local file = vim.fn.expand('%:p')
-  local result = p4_cmd('edit ', file)
+  local result = p4_cmd({cmd = 'edit ', filepath = file})
   if result then
     vim.notify('P4: ' .. result[1], vim.log.levels.INFO)
     vim.bo.readonly = false
@@ -55,7 +61,7 @@ end
 
 local function p4_add()
   local file = vim.fn.expand('%:p')
-  local result = p4_cmd('add ', file)
+  local result = p4_cmd({cmd = 'add ', filepath = file})
   if result then
     vim.notify('P4: ' .. result[1], vim.log.levels.INFO)
   end
@@ -68,7 +74,7 @@ local function p4_revert()
     function(input)
       if not (input and input:lower() == 'y') then return end
       -- Revert file
-      local result = p4_cmd('revert ', file)
+      local result = p4_cmd({cmd = 'revert ', filepath = file})
       if result then
         vim.notify('P4: ' .. result[1], vim.log.levels.INFO)
         vim.cmd('checktime')
@@ -84,7 +90,7 @@ local function p4_delete()
     function(input)
       if not (input and input:lower() == 'y') then return end
       -- Delete file
-      local result = p4_cmd('delete ', file)
+      local result = p4_cmd({cmd = 'delete ', filepath = file})
       if result then
         vim.cmd('bd!')  -- Close buffer
         vim.notify('P4: File marked for delete', vim.log.levels.INFO)
@@ -99,9 +105,9 @@ local function p4_rename()
     function(new_path)
       if not (new_path and new_path ~= filepath) then return end
       -- First we need to edit the source file if not already opened
-      p4_cmd('edit ', filepath)
+      p4_cmd({cmd = 'edit ', filepath = filepath})
       -- Move/Rename file
-      local result = p4_cmd('move ', filepath, new_path)
+      local result = p4_cmd({cmd = 'move ', filepath = filepath, newpath = new_path})
       if result then
         vim.notify('P4: File moved/renamed', vim.log.levels.INFO)
         local old_buf = vim.api.nvim_get_current_buf()
@@ -115,7 +121,7 @@ end
 local function p4_vdiffsplit(file)
   -- Get depot info for #have
   local depot_file, have_rev, action, moved_file
-  local fstat = p4_cmd('fstat ', file)
+  local fstat = p4_cmd({cmd = 'fstat ', filepath = file})
   if fstat then
     for _, line in ipairs(fstat) do
       local df = line:match('^%.%.%. depotFile (.+)$')
@@ -136,10 +142,10 @@ local function p4_vdiffsplit(file)
     depot_content = {}
   elseif action == 'move/add' then
     -- For move/add, get content from movedFile at #have
-    depot_content = p4_cmd('print -q ', moved_file, nil, have_rev)
+    depot_content = p4_cmd({cmd = 'print -q ', filepath = moved_file, revision = have_rev})
   else
     -- For edit
-    depot_content = p4_cmd('print -q ', depot_file, nil, have_rev)
+    depot_content = p4_cmd({cmd = 'print -q ', filepath = depot_file, revision = have_rev})
   end
 
   -- Ensure the local file is the current buffer (like Gvdiffsplit)
@@ -221,7 +227,7 @@ end
 -- DATA FETCHING -------------------------------------------------------------
 
 local function get_client_info()
-  local client_info = p4_cmd('info')
+  local client_info = p4_cmd({cmd = 'info'})
   local client_name, client_root, client_stream
   for _, line in ipairs(client_info) do
     if not client_name then
@@ -253,7 +259,7 @@ local function get_changelist_description(cl)
   -- Nothing to do for default changelist
   if cl == 'default' then return 'Default changelist' end
 
-  local change_info = p4_cmd('change -o ' .. cl)
+  local change_info = p4_cmd({cmd = 'change -o ' .. cl})
   if not change_info then
     error('Failed to get changelist info for CL ' .. cl)
   end
@@ -273,7 +279,7 @@ end
 local function get_all_changelists()
   local file_map = {}
   --  Get all changes for the current client
-  local changes_output = p4_cmd('changes -c ' .. vim.fn.shellescape(State.client.name))
+  local changes_output = p4_cmd({cmd = 'changes -c ' .. vim.fn.shellescape(State.client.name)})
   for _, line in ipairs(changes_output) do
     local change_number = line:match('^Change (%d+)')
     if change_number then
@@ -294,7 +300,7 @@ local function get_all_changelists()
     }
   end
   -- Search for all opened files and group by changelist
-  local files_output = p4_cmd('opened')
+  local files_output = p4_cmd({cmd = 'opened'})
   for _, line in ipairs(files_output) do
     local depot_path = line:match('^(//[^#]+)')
     if depot_path then
@@ -313,7 +319,7 @@ local function get_all_changelists()
   for cn, _ in pairs(file_map) do
     if cn ~= 'default' then
       local in_shelved = false
-      local shelved_output = p4_cmd('describe -s -S ' .. cn)
+      local shelved_output = p4_cmd({cmd = 'describe -s -S ' .. cn})
       for _, line in ipairs(shelved_output) do
         if line:match('^Shelved files') then
           in_shelved = true
@@ -374,7 +380,7 @@ local function build_display_lines()
   end
 
   -- Help line
-  table.insert(lines, '[Enter=open/edit/toggle | d=diff | r=revert | m=move | s=shelve | u=unshelve | D=delete | N=new CL]')
+  table.insert(lines, '[Enter=open/edit/toggle | d=diff | r=revert | m=move | s=shelve | u=unshelve | D=delete | N=new CL | A=all]')
 
   return lines, index_map
 end
@@ -556,7 +562,7 @@ local function input_action()
               local target = obj.stdout:match('Change (%d+)')
               local files_to_move = State.changelists[data.change_number].opened_files
               for _, file in ipairs(files_to_move) do
-                p4_cmd('reopen -c ' .. target .. ' ', file.depot_path)
+                p4_cmd({cmd = 'reopen -c ' .. target .. ' ', filepath = file.depot_path})
               end
               -- Refresh and update display
               update_display(true)
@@ -587,7 +593,7 @@ local function shelve_files()
       vim.notify('Cannot shelve files in default changelist', vim.log.levels.WARN)
       return
     end
-    p4_cmd('shelve -f -c ' .. current_cl .. ' ', file.depot_path)
+    p4_cmd({cmd = 'shelve -f -c ' .. current_cl .. ' ', filepath = file.depot_path})
     update_display(true)
   -- Shelve entire changelist
   elseif data.type == 'changelist' then
@@ -596,7 +602,7 @@ local function shelve_files()
       vim.notify('Cannot shelve default changelist', vim.log.levels.WARN)
       return
     end
-    p4_cmd('shelve -f -c ' .. cn)
+    p4_cmd({cmd = 'shelve -f -c ' .. cn})
     update_display(true)
   end
 end
@@ -617,13 +623,13 @@ local function unshelve_files()
   if data.type == 'shelved_file' then
     local cn = data.change_number
     local depot_path = data.shelved_file
-    p4_cmd('unshelve -s ' .. cn .. ' -c ' .. cn .. ' ', depot_path)
+    p4_cmd({cmd = 'unshelve -s ' .. cn .. ' -c ' .. cn .. ' ', filepath = depot_path})
     vim.cmd('checktime') -- Refresh file in editor if open
     update_display(true)
   -- Unshelve entire changelist
   elseif data.type == 'changelist' then
     local cn = data.change_number
-    p4_cmd('unshelve -s ' .. cn .. ' -c ' .. cn)
+    p4_cmd({cmd = 'unshelve -s ' .. cn .. ' -c ' .. cn})
     vim.cmd('checktime') -- Refresh files in editor if open
     update_display(true)
   end
@@ -648,7 +654,7 @@ local function revert_files()
       { prompt = 'Revert ' .. file.relative_path .. '? (y/N): ' },
       function(input)
         if not (input and input:lower() == 'y') then return end
-        p4_cmd('revert ', file.depot_path)
+        p4_cmd({cmd = 'revert ', filepath = file.depot_path})
         vim.cmd('checktime') -- Refresh file in editor if open
         update_display(true)
       end
@@ -661,7 +667,7 @@ local function revert_files()
       function(input)
         if not (input and input:lower() == 'y') then return end
         vim.cmd('checktime') -- Refresh files in editor if open
-        p4_cmd('revert -c ' .. cn .. ' //...')
+        p4_cmd({cmd = 'revert -c ' .. cn .. ' //...'})
         update_display(true)
       end
     )
@@ -700,11 +706,11 @@ local function move_files()
           local cn = data.change_number
           local files_to_move = State.changelists[cn].opened_files
           for _, file in ipairs(files_to_move) do
-            p4_cmd('reopen -c ' .. target .. ' ', file.depot_path)
+            p4_cmd({cmd = 'reopen -c ' .. target .. ' ', filepath = file.depot_path})
           end
         -- Move single file
         elseif data.type == 'opened_file' then
-          p4_cmd('reopen -c ' .. target .. ' ', data.opened_file.depot_path)
+          p4_cmd({cmd = 'reopen -c ' .. target .. ' ', filepath = data.opened_file.depot_path})
         end
         -- Refresh and update display
         vim.schedule(function() update_display(true) end)
@@ -740,14 +746,14 @@ local function delete_stuff()
       function(input)
         if not (input and input:lower() == 'y') then return end
         -- First revert all opened files
-        p4_cmd('revert -c ' .. cn .. ' //...')
+        p4_cmd({cmd = 'revert -c ' .. cn .. ' //...'})
         -- Then delete shelved files if any
         local shelved_files = State.changelists[cn].shelved_files
         for _, depot_path in ipairs(shelved_files) do
-          p4_cmd('shelve -d -c ' .. cn .. ' ', depot_path)
+          p4_cmd({cmd = 'shelve -d -c ' .. cn .. ' ', filepath = depot_path})
         end
         -- Finally delete the changelist itself
-        p4_cmd('change -d ' .. cn)
+        p4_cmd({cmd = 'change -d ' .. cn})
         update_display(true)
       end
     )
@@ -760,7 +766,7 @@ local function delete_stuff()
       { prompt = 'Delete shelved file ' .. depot_path .. ' from CL ' .. cn .. '? (y/N): ' },
       function(input)
         if not (input and input:lower() == 'y') then return end
-        p4_cmd('shelve -d -c ' .. cn .. ' ', depot_path)
+        p4_cmd({cmd = 'shelve -d -c ' .. cn .. ' ', filepath = depot_path})
         update_display(true)
       end
     )
@@ -772,7 +778,7 @@ local function delete_stuff()
       { prompt = 'Delete all shelved files in changelist ' .. cn .. '? (y/N): ' },
       function(input)
         if not (input and input:lower() == 'y') then return end
-        p4_cmd('shelve -d -c ' .. cn)
+        p4_cmd({cmd = 'shelve -d -c ' .. cn})
         update_display(true)
       end
     )
@@ -819,6 +825,24 @@ local function show_diff()
     close_window()
     vim.cmd('edit ' .. vim.fn.fnameescape(filepath))
     vim.schedule(function() p4_vdiffsplit(filepath) end)
+  end
+end
+
+local function review_all_opened_files()
+  -- Get all files to review
+  local files_to_open = {}
+  for _, content in pairs(State.changelists) do
+    for _, file in ipairs(content.opened_files) do
+      if not file.action:match('move/delete') then
+        table.insert(files_to_open, State.client.root .. '/' .. file.relative_path)
+      end
+    end
+  end
+  -- Close the window
+  close_window()
+  -- Open each file in its own buffer
+  for _, filepath in ipairs(files_to_open) do
+      vim.cmd('edit ' .. vim.fn.fnameescape(filepath))
   end
 end
 
@@ -873,6 +897,7 @@ local function show_window()
   vim.keymap.set('n', 'D', delete_stuff, opts)
   vim.keymap.set('n', 'N', create_changelist, opts)
   vim.keymap.set('n', 'd', show_diff, opts)
+  vim.keymap.set('n', 'A', review_all_opened_files, opts)
   for _, key in ipairs({'q', '<Esc>'}) do
       vim.keymap.set('n', key, close_window, opts)
   end
@@ -889,6 +914,7 @@ vim.api.nvim_create_user_command('P4Revert', p4_revert, { desc = 'P4: Revert cur
 vim.api.nvim_create_user_command('P4Delete', p4_delete, { desc = 'P4: Delete current file' })
 vim.api.nvim_create_user_command('P4Rename', p4_rename, { desc = 'P4: Rename/move current file' })
 vim.api.nvim_create_user_command('P4Diff', function() p4_vdiffsplit(vim.fn.expand('%:p')) end,  { desc = 'P4: Diff current file' })
+vim.api.nvim_create_user_command('P4ReviewNext', function() vim.cmd('bn | bd #') end, { desc = 'P4: Review next opened file' })
 
 -- Keymaps
 vim.keymap.set('n', '<leader>ps', show_window, { desc = 'P4: Show opened files' })
@@ -898,3 +924,4 @@ vim.keymap.set('n', '<leader>pr', p4_revert, { desc = 'P4: Revert current file' 
 vim.keymap.set('n', '<leader>pD', p4_delete, { desc = 'P4: Delete current file' })
 vim.keymap.set('n', '<leader>pR', p4_rename, { desc = 'P4: Rename/move current file' })
 vim.keymap.set('n', '<leader>pd', function() p4_vdiffsplit(vim.fn.expand('%:p')) end, { desc = 'P4: Diff current file' })
+vim.keymap.set('n', '<leader>pn', function() vim.cmd('bn | bd #') end, { desc = 'P4: Review next opened file' })

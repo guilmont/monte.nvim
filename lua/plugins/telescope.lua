@@ -9,7 +9,14 @@ return {
   config = function()
     local telescope = require 'telescope'
     local builtin = require 'telescope.builtin'
-    telescope.setup {}
+    telescope.setup({
+      pickers = {
+        buffers = {
+          sort_lastused = true,
+          ignore_current_buffer = true,
+        },
+      },
+    })
     pcall(telescope.load_extension, 'fzf')
 
     -- Quick navigation
