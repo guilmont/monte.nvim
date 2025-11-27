@@ -284,7 +284,7 @@ local function run_command(cmd)
 
   -- Add command header
   vim.bo[state.buf].modifiable = true
-  vim.api.nvim_buf_set_lines(state.buf, 0, 0, false, { '$ ' .. cmd, '' })
+  vim.api.nvim_buf_set_lines(state.buf, 0, 0, false, {'@ ' .. vim.fn.getcwd(), '$ ' .. cmd, '' })
   vim.bo[state.buf].modifiable = false
 
   -- Start async job

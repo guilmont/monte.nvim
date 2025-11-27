@@ -14,18 +14,17 @@ return {
         buffers = {
           sort_lastused = true,
           ignore_current_buffer = true,
+          mappings = {
+            i = { ['<C-d>'] = 'delete_buffer' },
+          },
         },
       },
     })
     pcall(telescope.load_extension, 'fzf')
 
     -- Quick navigation
-    vim.keymap.set('n', '<C-p>', function()
-      builtin.find_files { cwd = vim.fn.getcwd(), hidden = true }
-    end, { desc = 'Find files (Ctrl+P)' })
+    vim.keymap.set('n', '<C-p>', function() builtin.find_files { cwd = vim.fn.getcwd() } end, { desc = 'Find files (Ctrl+P)' })
     vim.keymap.set('n', '<C-b>', builtin.buffers, { desc = 'Switch buffer' })
-    vim.keymap.set('n', '<C-g>', function()
-      builtin.live_grep { cwd = vim.fn.getcwd() }
-    end, { desc = 'Grep project' })
+    vim.keymap.set('n', '<C-g>', function() builtin.live_grep { cwd = vim.fn.getcwd() } end, { desc = 'Grep project' })
   end,
 }

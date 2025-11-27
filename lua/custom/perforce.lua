@@ -278,7 +278,7 @@ end
 local function get_all_changelists()
   local file_map = {}
   --  Get all changes for the current client
-  local changes_output = p4_cmd({cmd = 'changes -c ' .. vim.fn.shellescape(State.client.name)})
+  local changes_output = p4_cmd({cmd = 'changes -s pending -c ' .. vim.fn.shellescape(State.client.name)})
   for _, line in ipairs(changes_output) do
     local change_number = line:match('^Change (%d+)')
     if change_number then
@@ -832,7 +832,7 @@ local function review_all_opened_files()
   local files_to_open = {}
   for _, content in pairs(State.changelists) do
     for _, file in ipairs(content.opened_files) do
-      if not file.action:match('move/delete') then
+      if not (file.action:match('move/delete') or file.action:match('delete')) then
         table.insert(files_to_open, State.client.root .. '/' .. file.relative_path)
       end
     end
