@@ -41,8 +41,9 @@ nvim
 ### First-time Setup
 
 1. **Install LSP servers**: Run `:Mason` and install desired servers (e.g., `clangd`, `lua_ls`, `pyright`)
-2. **Set up Copilot**: Run `:Copilot setup` and follow the authentication flow
-3. **That's it!** Start coding
+2. **Configure newly installed servers**: Run `:LspSetupInstalled` (or restart Neovim) after adding servers in Mason
+3. **Set up Copilot**: Run `:Copilot setup` and follow the authentication flow
+4. **That's it!** Start coding
 
 ## ⌨️ Keybindings
 
@@ -110,6 +111,7 @@ nvim
 | `i` | `j` / `k` | Next / previous item |
 
 Tip: `Tab` is used to accept GitHub Copilot suggestions in this setup.
+Completion is manual by design (the completion menu does not auto-open).
 
 ### GitHub Copilot
 
@@ -137,9 +139,10 @@ Tip: `Tab` is used to accept GitHub Copilot suggestions in this setup.
 | `n` | `<leader>pe` | Edit current file |
 | `n` | `<leader>pa` | Add current file |
 | `n` | `<leader>pr` | Revert current file |
-| `n` | `<leader>px` | Delete current file |
-| `n` | `<leader>pm` | Move/rename current file |
+| `n` | `<leader>pD` | Delete current file |
+| `n` | `<leader>pR` | Move/rename current file |
 | `n` | `<leader>pd` | Diff current file |
+| `n` | `<leader>pn` | Review next opened file |
 
 #### Perforce Changelist Manager (`:P4Opened` or `<leader>ps`)
 
@@ -153,6 +156,7 @@ Tip: `Tab` is used to accept GitHub Copilot suggestions in this setup.
 | `n` | `u` | Unshelve file or CL |
 | `n` | `D` | Delete file, CL, or shelf |
 | `n` | `N` | Create new changelist |
+| `n` | `A` | Review all opened files |
 | `n` | `q` / `Esc` | Close window |
 
 ### Command Runner (`:Run`)
@@ -161,9 +165,11 @@ Tip: `Tab` is used to accept GitHub Copilot suggestions in this setup.
 |------|-----|--------|
 | - | `:Run <command>` | Run command async with live output |
 | - | `:Run` (no args) | Prompt for command with completion |
-| `n` | `Enter` (in output) | Open file at line under cursor |
-| `n` | Click (in output) | Same as Enter - jump to error |
-| `n` | `q` (in output) | Close output window |
+| `n` | `<leader>r` | Prompt for command (pre-fills `:Run `) |
+| `n` (output) | `Enter` / Click | Open file at line under cursor |
+| `n` (output) | `Tab` / `Shift+Tab` | Next / previous file location |
+| `n` (output) | `r` | Re-run last command |
+| `n` (output) | `q` | Close output window |
 
 Examples:
 - `:Run make`
@@ -254,10 +260,6 @@ local server_overrides = {
   clangd = { cmd = { 'clangd', '--background-index' } },
 }
 ```
-
-### Adjust Command Runner Output Width
-
-Edit `lua/custom/run.lua` and change the `60` in `nvim_win_set_width(win, 60)` to your preferred width.
 
 ### Configure Perforce Client
 
