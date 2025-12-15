@@ -169,13 +169,17 @@ Completion is manual by design (the completion menu does not auto-open).
 | `n` (output) | `Enter` / Click | Open file at line under cursor |
 | `n` (output) | `Tab` / `Shift+Tab` | Next / previous file location |
 | `n` (output) | `r` | Re-run last command |
-| `n` (output) | `q` | Close output window |
+| `n` (output) | `k` | Kill running job |
 
 Examples:
 - `:Run make`
 - `:Run cargo build`
 - `:Run g++ main.cpp -o a.out`
 - `:Run npm test`
+
+Notes:
+- The output buffer persists when closing the window with `:q`.
+- Use `k` in the output buffer to terminate a long-running job.
 
 ### Neo-tree (File Explorer)
 

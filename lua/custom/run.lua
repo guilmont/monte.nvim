@@ -10,6 +10,7 @@ local state = {
   win = nil,       -- Output window handle
   job = nil,       -- Current running job ID
   last_cmd = nil,  -- Last command for recompile
+  killed_job = nil, -- Job ID that was explicitly killed
 }
 
 -- ============================================================================
@@ -159,6 +160,18 @@ end
 -- Window & Buffer Management
 -- ============================================================================
 
+--- Stop the current running job, if any
+local function kill_job()
+  if not state.job then
+    return false
+  end
+
+  -- Remember which job we killed so on_exit can emit the right message
+  state.killed_job = state.job
+  vim.fn.jobstop(state.job)
+  return true
+end
+
 --- Setup syntax highlighting for the output buffer
 ---@param buf number
 local function setup_syntax(buf)
@@ -190,7 +203,15 @@ local function setup_keymaps(buf)
   map('<Tab>', goto_next_location, 'Next file location')
   map('<S-Tab>', goto_prev_location, 'Previous file location')
   map('r', function() recompile() end, 'Recompile')
+  map('k', function()
+    if kill_job() then
+      vim.notify('Killed running job', vim.log.levels.INFO)
+    else
+      vim.notify('No running job to kill', vim.log.levels.WARN)
+    end
+  end, 'Kill running job')
 end
+
 
 --- Create a new output window and buffer
 ---@return number buf Buffer handle
@@ -274,10 +295,7 @@ end
 ---@param cmd string
 local function run_command(cmd)
   -- Stop any running job before starting new one
-  if state.job then
-    vim.fn.jobstop(state.job)
-    state.job = nil
-  end
+  kill_job()
 
   state.last_cmd = cmd
   prepare_window()
@@ -295,7 +313,33 @@ local function run_command(cmd)
     on_stderr = function(_, data)
       append_output(data)
     end,
-    on_exit = function(_, exit_code)
+    on_exit = function(job_id, exit_code)
+      -- If we intentionally killed this job, show a killed message even if a new job started
+      if state.killed_job == job_id then
+        state.killed_job = nil
+        vim.schedule(function()
+          if not vim.api.nvim_buf_is_valid(state.buf) then
+            return
+          end
+          vim.bo[state.buf].modifiable = true
+          vim.api.nvim_buf_set_lines(state.buf, -1, -1, false, {
+            '',
+            '[Process killed]',
+          })
+          vim.bo[state.buf].modifiable = false
+        end)
+        -- Do not clear state.job here; it may have been overwritten by a new run
+        if state.job == job_id then
+          state.job = nil
+        end
+        return
+      end
+
+      -- Ignore exit from an older job if a new one has already started
+      if state.job ~= job_id then
+        return
+      end
+
       vim.schedule(function()
         if not vim.api.nvim_buf_is_valid(state.buf) then
           return
