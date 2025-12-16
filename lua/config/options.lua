@@ -7,6 +7,10 @@ vim.opt.relativenumber = true
 -- Enable mouse mode, can be useful for resizing splits for example!
 vim.opt.mouse = 'a'
 
+-- Set title of terminal window to current working directory
+vim.opt.title = true
+vim.opt.titlestring = 'nvim @ ' .. vim.fn.fnamemodify(vim.fn.getcwd(), ':t')
+
 -- Don't show the mode, since it's already in the status line
 vim.opt.showmode = false
 
