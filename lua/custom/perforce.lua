@@ -183,6 +183,19 @@ local function p4_vdiffsplit(file)
   local function close_diff()
     pcall(vim.api.nvim_win_call, local_win, function() vim.cmd('diffoff') end)
     pcall(vim.api.nvim_win_call, left_win, function() vim.cmd('diffoff') end)
+    -- Reset cursor and scroll binding options
+    if vim.api.nvim_win_is_valid(left_win) then
+      pcall(function()
+        vim.wo[left_win].scrollbind = false
+        vim.wo[left_win].cursorbind = false
+      end)
+    end
+    if vim.api.nvim_win_is_valid(local_win) then
+      pcall(function()
+        vim.wo[local_win].scrollbind = false
+        vim.wo[local_win].cursorbind = false
+      end)
+    end
     if vim.api.nvim_buf_is_valid(left_buf) then
       pcall(vim.api.nvim_buf_delete, left_buf, { force = true })
     end

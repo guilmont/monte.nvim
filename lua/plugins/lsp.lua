@@ -58,18 +58,21 @@ return {
         map('<leader>ls', vim.lsp.buf.signature_help, 'Signature Help')
         map('<leader>lR', vim.lsp.buf.rename, 'Rename')
         map('<leader>la', vim.lsp.buf.code_action, 'Code Action')
-        map('<leader>lf', function() vim.lsp.buf.format { async = true } end, 'Format Buffer')
+        map('<leader>lF', function() vim.lsp.buf.format { async = true } end, 'Format Buffer')
         map('<leader>lS', vim.lsp.buf.workspace_symbol, 'Workspace Symbols')
         map('<leader>lwA', vim.lsp.buf.add_workspace_folder, 'Add Workspace Folder')
         map('<leader>lwR', vim.lsp.buf.remove_workspace_folder, 'Remove Workspace Folder')
-        map('<leader>lwl', function() print(vim.inspect(vim.lsp.buf.list_workspace_folders())) end, 'List Workspace Folders')
+        map('<leader>lwl', function() print(vim.inspect(vim.lsp.buf.list_workspace_folders())) end,
+          'List Workspace Folders')
         map('<leader>lx', vim.diagnostic.open_float, 'Line Diagnostics')
         map('<leader>lX', function()
           for _, client in ipairs(vim.lsp.get_clients({ bufnr = buf })) do
             vim.lsp.stop_client(client.id)
           end
         end, 'Restart LSP Clients')
-        map('<leader>lH', function() if vim.lsp.inlay_hint then vim.lsp.inlay_hint.enable(not vim.lsp.inlay_hint.is_enabled({ bufnr = buf }), { bufnr = buf }) end end, 'Toggle Inlay Hints')
+        map('<leader>lH',
+          function() if vim.lsp.inlay_hint then vim.lsp.inlay_hint.enable(
+              not vim.lsp.inlay_hint.is_enabled({ bufnr = buf }), { bufnr = buf }) end end, 'Toggle Inlay Hints')
         map('[d', vim.diagnostic.goto_prev, 'Previous Diagnostic')
         map(']d', vim.diagnostic.goto_next, 'Next Diagnostic')
       end,
