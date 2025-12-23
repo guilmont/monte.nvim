@@ -1,290 +1,502 @@
 -- Async command runner with live output in a split window
--- Supports clickable file:line navigation and syntax highlighting
 
 -- ============================================================================
--- State
+-- Auto completion
 -- ============================================================================
 
-local state = {
-  buf = nil,       -- Output buffer handle
-  win = nil,       -- Output window handle
-  job = nil,       -- Current running job ID
-  last_cmd = nil,  -- Last command for recompile
-  killed_job = nil, -- Job ID that was explicitly killed
-}
+--- Global cache variables
+local commands_cache = nil
+local environ_cache = nil
+
+--- Fill the commands cache from PATH
+function fill_commands_cache()
+    if commands_cache == nil then
+        -- Build cache of executable commands in PATH
+        local paths = vim.split(os.getenv('PATH') or '', ':')
+        local commands = {}
+        local seen = {}
+        for _, path in ipairs(paths) do
+            local ok, entries = pcall(vim.fn.readdir, path)
+            if ok and entries then
+                for _, cmd in ipairs(entries) do
+                    if not seen[cmd] then
+                        table.insert(commands, cmd)
+                        seen[cmd] = true
+                    end
+                end
+            end
+        end
+        commands_cache = commands
+    end
+end
+
+--- Fill environment variables cache
+function fill_environ_cache()
+    if environ_cache == nil then
+        local env_vars = {}
+        for k, _ in pairs(vim.fn.environ()) do
+            table.insert(env_vars, '$' .. k)
+        end
+        environ_cache = env_vars
+    end
+end
+
+--- Custom completion for Run command
+local function complete_run_command(arg_lead, cmd_line, cursor_pos)
+    -- Only provide completion at the end of the command line
+    if cursor_pos < #cmd_line then
+        return {}
+    end
+    -- Determine if we need to provide completion for a command:
+    -- 1) First argument after 'Run'
+    -- 2) After a command separator
+    local separators = { ';', '&&', '||', '|', '(', '{', '\n' }
+    local preceding_text = cmd_line:sub(1, cursor_pos - #arg_lead - 1):match('(%S+)%s*$') or ''
+    local last_char = preceding_text:sub(-1)
+    local is_command_start = preceding_text == 'Run' or vim.tbl_contains(separators, last_char)
+    -- Determine if arg_lead looks like an environment variable, ie, starts with $
+    local is_environment_var = arg_lead:match('^%$%a*') ~= nil
+
+    -- Path-based completion for absolute (/...), relative (./, ../, sub/...), or ~ paths
+    if arg_lead:find('/') or arg_lead:sub(1,1) == '~' then
+        local dir = arg_lead:match('(.*/)') or './'
+        local base = arg_lead:sub(#dir + 1)
+
+        local expanded_dir = vim.fn.expand(dir)
+        if vim.fn.isdirectory(expanded_dir) == 0 then
+            return {}
+        end
+        if expanded_dir:sub(-1) ~= '/' then
+            expanded_dir = expanded_dir .. '/'
+        end
+
+        local entries = vim.fn.readdir(expanded_dir)
+        local matches = {}
+        for _, name in ipairs(entries) do
+            if name ~= '.' and name ~= '..' and name:sub(1, #base) == base then
+                local full = expanded_dir .. name
+                local is_dir = vim.fn.isdirectory(full) == 1
+                local display = dir .. name .. (is_dir and '/' or '')
+                if is_dir or (not is_command_start) or (vim.fn.executable(full) == 1) then
+                    table.insert(matches, display)
+                end
+            end
+        end
+        return matches
+    end
+
+    if is_command_start then
+        -- If commands cache is empty, fill it
+        if commands_cache == nil then
+            fill_commands_cache()
+        end
+        -- Filter cached commands based on arg_lead
+        local matches = {}
+        for _, cmd in ipairs(commands_cache) do
+            if cmd:sub(1, #arg_lead) == arg_lead then
+                table.insert(matches, cmd)
+            end
+        end
+        -- Return matching commands for completion
+        return matches
+
+    elseif is_environment_var then
+        -- If environment cache is empty, fill it
+        if environ_cache == nil then
+            fill_environ_cache()
+        end
+        -- Filter cached environment variables based on arg_lead
+        local env_vars = {}
+        for _, var in ipairs(environ_cache) do
+            if var:sub(1, #arg_lead) == arg_lead then
+                table.insert(env_vars, var)
+            end
+        end
+        -- Return matching environment variables for completion
+        return env_vars
+
+    else
+        -- Get all the files in the current working directory
+        local cwd = vim.fn.getcwd()
+        local files = vim.fn.readdir(cwd)
+        local matches = {}
+        for _, file in ipairs(files) do
+            if file:sub(1, #arg_lead) == arg_lead then
+                table.insert(matches, file)
+            end
+        end
+        return matches
+    end
+end
+
+
+-- ============================================================================
+-- Global state
+-- ============================================================================
+
+-- Global state
+local BUFFER_NAME = '[Run Output]'
+local output_buffer = nil
+local output_window = nil
+
+local run_command = nil  -- Forward function declaration
+local last_command = nil
+local running_job = nil
+
+local ansi_namespace = nil
+local current_ansi_state = nil  -- Tracks ANSI state across lines
+local navigation_marks = {}  -- Maps line numbers to file locations
 
 -- ============================================================================
 -- Utility Functions
 -- ============================================================================
 
---- Remove ANSI escape codes from a string
-local function strip_ansi(str)
-  return str:gsub('\27%[[%d;]*[%a]', '')
-end
-
---- Parse file path and line number from compiler/linter output
---- Supports formats: file:line:col, file:line, file(line,col), file(line)
----@return number|nil column_number
-local function parse_file_location(line)
-  local clean = strip_ansi(line)
-  local file, lnum, col
-
-  -- Try patterns: file:line:col or file:line
-  file, lnum, col = clean:match('([%w%._%+/%-~]+):(%d+):?(%d*)')
-
-  -- Try patterns: file(line,col) or file(line)
-  if not file then
-    file, lnum, col = clean:match('([%w%._%+/%-~]+)%((%d+),?(%d*)%)')
-  end
-
-  if not (file and lnum and lnum ~= '') then
-    return nil, nil, nil
-  end
-
-  -- Expand and normalize path
-  if file:sub(1, 1) == '~' then
-    file = vim.fn.expand(file)
-  elseif not file:match('^/') then
-    file = vim.fn.fnamemodify(file, ':p')
-  end
-
-  -- Verify file exists
-  if vim.fn.filereadable(file) == 1 then
-    return file, tonumber(lnum), tonumber(col ~= '' and col or 1)
-  end
-
-  return nil, nil, nil
-end
-
---- Find the next/previous line with a file location
----@param direction number 1 for next, -1 for previous
----@return number|nil line_number
-local function find_next_file_location(direction)
-  local current_line = vim.api.nvim_win_get_cursor(0)[1]
-  local total_lines = vim.api.nvim_buf_line_count(0)
-  local line_num = current_line + direction
-
-  -- Wrap around search
-  while line_num > 0 and line_num <= total_lines do
-    local line = vim.api.nvim_buf_get_lines(0, line_num - 1, line_num, false)[1] or ''
-    local file = parse_file_location(line)
-
-    if file then
-      return line_num
+--- Kill the current running job, if any
+local function kill_running_job()
+    if running_job then
+        vim.fn.jobstop(running_job)
+        running_job = nil
     end
-
-    line_num = line_num + direction
-
-    -- Wrap around
-    if line_num > total_lines then
-      line_num = 1
-    elseif line_num < 1 then
-      line_num = total_lines
-    end
-
-    -- Prevent infinite loop
-    if line_num == current_line then
-      break
-    end
-  end
-
-  return nil
 end
 
---- Navigate to next file location in output
-local function goto_next_location()
-  local next_line = find_next_file_location(1)
-  if next_line then
-    vim.api.nvim_win_set_cursor(0, { next_line, 0 })
-  end
-end
-
---- Navigate to previous file location in output
-local function goto_prev_location()
-  local next_line = find_next_file_location(-1)
-  if next_line then
-    vim.api.nvim_win_set_cursor(0, { next_line, 0 })
-  end
-end
-
--- Forward declaration for recompile (used in setup_keymaps)
-local recompile
-
---- Find existing buffer for a file path
----@param filepath string
----@return number|nil bufnr
-local function find_buffer_by_path(filepath)
-  local normalized = vim.fn.fnamemodify(filepath, ':p')
-
-  for _, buf in ipairs(vim.api.nvim_list_bufs()) do
-    if vim.api.nvim_buf_is_valid(buf) and vim.api.nvim_buf_is_loaded(buf) then
-      local buf_name = vim.api.nvim_buf_get_name(buf)
-      if buf_name ~= '' then
-        local buf_normalized = vim.fn.fnamemodify(buf_name, ':p')
-        if buf_normalized == normalized then
-          return buf
-        end
-      end
-    end
-  end
-
-  return nil
-end
-
---- Navigate to file at cursor line (callback for keymaps)
-local function open_file_at_cursor()
-  local cursor_line = vim.api.nvim_win_get_cursor(0)[1]
-  local line = vim.api.nvim_buf_get_lines(0, cursor_line - 1, cursor_line, false)[1] or ''
-  local file, lnum, col = parse_file_location(line)
-
-  if not file then
-    return
-  end
-
-  -- Jump to left window and open file
-  vim.cmd('wincmd h')
-
-  -- Check if buffer already exists and switch to it, otherwise open file
-  local existing_buf = find_buffer_by_path(file)
-  if existing_buf then
-    vim.api.nvim_win_set_buf(0, existing_buf)
-  else
-    vim.cmd('edit ' .. vim.fn.fnameescape(file))
-  end
-
-  pcall(vim.api.nvim_win_set_cursor, 0, { lnum, math.max(0, col - 1) })
-  vim.cmd('normal! zz')
-end
-
--- ============================================================================
--- Window & Buffer Management
--- ============================================================================
-
---- Stop the current running job, if any
-local function kill_job()
-  if not state.job then
-    return false
-  end
-
-  -- Remember which job we killed so on_exit can emit the right message
-  state.killed_job = state.job
-  vim.fn.jobstop(state.job)
-  return true
-end
-
---- Setup syntax highlighting for the output buffer
----@param buf number
-local function setup_syntax(buf)
-  vim.api.nvim_buf_call(buf, function()
-    vim.cmd([[
-      syntax clear
-      syntax match RunCommand /^\$ .*/
-      syntax match RunError /\c\<error\>\|\cfailed\|\c\<fatal\>/
-      syntax match RunWarning /\c\<warning\>\|\c\<warn\>/
-      syntax match RunFilePath /\v[a-zA-Z0-9_.+\/~-]+:\d+(:\d+)?/
-      syntax match RunExitCode /^\[Process exited with code \d\+\]$/
-      highlight default link RunCommand Comment
-      highlight default link RunError ErrorMsg
-      highlight default link RunWarning WarningMsg
-      highlight default link RunFilePath Directory
-      highlight default link RunExitCode Comment
-    ]])
-  end)
-end
-
---- Setup keymaps for the output buffer
----@param buf number
-local function setup_keymaps(buf)
-  local map = function(key, fn, desc)
-    vim.keymap.set('n', key, fn, { buffer = buf, noremap = true, silent = true, desc = desc })
-  end
-
-  map('<CR>', open_file_at_cursor, 'Open file:line')
-  map('<Tab>', goto_next_location, 'Next file location')
-  map('<S-Tab>', goto_prev_location, 'Previous file location')
-  map('r', function() recompile() end, 'Recompile')
-  map('k', function()
-    if kill_job() then
-      vim.notify('Killed running job', vim.log.levels.INFO)
+--- Recompile - run the last command again
+local function rerun_last_command()
+    if last_command then
+        run_command(last_command)
     else
-      vim.notify('No running job to kill', vim.log.levels.WARN)
+        vim.notify('No previous command to re-run', vim.log.levels.WARN)
     end
-  end, 'Kill running job')
+end
+
+-- Match buffer name to identify output buffer
+local function is_output_buffer(buffer)
+    local name = vim.api.nvim_buf_get_name(buffer)
+    local stem = vim.fn.fnamemodify(name, ":t")
+    return stem == BUFFER_NAME
+end
+
+--- Map ANSI color codes to highlight groups
+local function get_ansi_highlight(code)
+    local colors = {['31']='Red',         ['32']='Green',     ['33']='Yellow',     ['34']='Blue',
+                    ['35']='Magenta',     ['36']='Cyan',      ['37']='White',
+                    ['91']='BoldRed',     ['92']='BoldGreen', ['93']='BoldYellow', ['94']='BoldBlue',
+                    ['95']='BoldMagenta', ['96']='BoldCyan',  ['97']='BoldWhite'}
+
+    if not code:find(';') then
+        return colors[code] and 'Ansi' .. colors[code]
+    end
+
+    -- Parse combined codes
+    local parts = vim.split(code, ';')
+    local style, color = '', nil
+    for _, p in ipairs(parts) do
+        if p == '1' then style = 'Bold'
+        elseif p == '3' then style = 'Italic'
+        elseif p == '4' then style = 'Underline'
+        elseif p == '9' then style = 'Strike'
+        elseif colors[p] then color = p
+        end
+    end
+
+    if color then return 'Ansi' .. style .. colors[color]
+    elseif style ~= '' then return 'Ansi' .. style
+    end
+end
+
+--- Process ANSI codes and apply highlighting
+local function process_ansi(line)
+    local clean_text = ''
+    local highlights = {}
+    local current_hl = current_ansi_state
+    local pos = 0
+    local hl_start = current_hl and 0 or nil
+
+    -- Strip all ANSI codes and track positions
+    local i = 1
+    while i <= #line do
+        if line:byte(i) == 27 and line:sub(i+1, i+1) == '[' then
+            -- Found ANSI escape sequence
+            local m_pos = line:find('m', i + 2, true)
+            if m_pos then
+                -- Close previous highlight
+                if current_hl and hl_start then
+                    table.insert(highlights, {hl = current_hl, start = hl_start, stop = pos})
+                end
+                -- Parse code and update state
+                local code = line:sub(i + 2, m_pos - 1)
+                current_hl = (code == '0' or code == '') and nil or get_ansi_highlight(code)
+                hl_start = current_hl and pos or nil
+                i = m_pos + 1
+            else
+                i = i + 1
+            end
+        else
+            -- Regular character
+            clean_text = clean_text .. line:sub(i, i)
+            pos = pos + 1
+            i = i + 1
+        end
+    end
+
+    -- Close final highlight
+    if current_hl and hl_start then
+        table.insert(highlights, {hl = current_hl, start = hl_start, stop = pos})
+    end
+
+    current_ansi_state = current_hl
+    return clean_text, highlights
+end
+
+--- Search for file:line patterns and set navigation marks
+local function search_locations(line, line_num)
+    local pattern = '([^%s:]+):(%d+)'  -- Match filename_or_path:number (no extension required)
+    local pos = 1
+    while pos <= #line do
+        local s, e, file, lineno = line:find(pattern, pos)
+        if not s then break end
+
+        local abs_path = vim.fn.fnamemodify(file, ':p')
+        if vim.fn.filereadable(abs_path) == 1 then
+            navigation_marks[line_num] = { file = abs_path, line = tonumber(lineno) }
+            -- Highlight the file:line pattern (0-based column indexing)
+            vim.api.nvim_buf_set_extmark(output_buffer, ansi_namespace, line_num, s - 1, {
+                end_col = e,
+                hl_group = 'Directory',
+            })
+        end
+        pos = e + 1
+    end
 end
 
 
---- Create a new output window and buffer
----@return number buf Buffer handle
----@return number win Window handle
-local function create_output_window()
-  local buf = vim.api.nvim_create_buf(true, true)
-  vim.bo[buf].buftype = 'nofile'
-  vim.bo[buf].bufhidden = 'hide'
-  vim.bo[buf].swapfile = false
-  vim.api.nvim_buf_set_name(buf, '[Run Output]')
+-- ============================================================================
+-- Window And Buffer Management
+-- ============================================================================
 
-  vim.cmd('botright vsplit')
-  local win = vim.api.nvim_get_current_win()
-  vim.api.nvim_win_set_buf(win, buf)
-
-  setup_syntax(buf)
-  setup_keymaps(buf)
-
-  return buf, win
-end
-
---- Ensure output window is visible and clear buffer
-local function prepare_window()
-  -- Create new window/buffer if needed
-  if not state.buf or not vim.api.nvim_buf_is_valid(state.buf) then
-    state.buf, state.win = create_output_window()
-    return
-  end
-
-  -- Clear existing content
-  vim.bo[state.buf].modifiable = true
-  vim.api.nvim_buf_set_lines(state.buf, 0, -1, false, {})
-
-  -- Show window if hidden
-  local wins = vim.fn.win_findbuf(state.buf)
-  if #wins == 0 then
+--- Show the output window
+local function show_window()
+    -- Reuse existing output window if found
+    for _, win in ipairs(vim.api.nvim_list_wins()) do
+        local buf = vim.api.nvim_win_get_buf(win)
+        if is_output_buffer(buf) then
+            vim.api.nvim_set_current_win(win)
+            output_window = win
+            return
+        end
+    end
+    -- No opened window found, so we create new vertical split for output
     vim.cmd('botright vsplit')
-    state.win = vim.api.nvim_get_current_win()
-    vim.api.nvim_win_set_buf(state.win, state.buf)
-  else
-    state.win = wins[1]
-  end
+    output_window = vim.api.nvim_get_current_win()
+    vim.api.nvim_win_set_buf(output_window, output_buffer)
+
 end
 
---- Append text to the output buffer
----@param lines string[]
-local function append_output(lines)
-  if not lines or #lines == 0 then
-    return
-  end
+--- Initialize syntax highlighting for output buffer
+local function initialize_syntax_highlighting()
+    -- Reset ANSI state for new command
+    current_ansi_state = nil
+    -- Create fresh namespace with unique name for each new buffer
+    ansi_namespace = vim.api.nvim_create_namespace('ansi_hl')
 
-  vim.schedule(function()
-    if not vim.api.nvim_buf_is_valid(state.buf) then
-      return
+    -- Setup syntax highlighting for this buffer
+    vim.api.nvim_buf_call(output_buffer, function()
+        vim.cmd([[
+          syntax clear
+          syntax match RunLocation /^@ .*/
+          syntax match RunCommand /^\$ .*/
+          syntax match RunExitCode /^\[Process exited with code \d\+\]$/
+          syntax match RunError /\c\<error\>\|\cfailed\|\c\<fatal\>/
+          syntax match RunWarning /\c\<warning\>\|\c\<warn\>/
+          highlight default link RunLocation Comment
+          highlight default link RunCommand Comment
+          highlight default link RunExitCode Comment
+          highlight default link RunError ErrorMsg
+          highlight default link RunWarning WarningMsg
+        ]])
+
+        -- Generate ANSI color highlights programmatically
+        local colors = {'Red', 'Green', 'Yellow', 'Blue', 'Magenta', 'Cyan', 'White'}
+        local styles = {
+            {prefix = '', attrs = ''},
+            {prefix = 'Bold', attrs = 'cterm=bold gui=bold'},
+            {prefix = 'Italic', attrs = 'cterm=italic gui=italic'},
+            {prefix = 'Underline', attrs = 'cterm=underline gui=underline'},
+            {prefix = 'Strike', attrs = 'cterm=strikethrough gui=strikethrough'},
+        }
+
+        for _, color in ipairs(colors) do
+            for _, style in ipairs(styles) do
+                local hl_name = 'Ansi' .. style.prefix .. color
+                local ctermfg = ({Red=1, Green=2, Yellow=3, Blue=4, Magenta=5, Cyan=6, White=7})[color]
+                local gui_color = string.lower(color)
+                vim.cmd(string.format('highlight %s ctermfg=%d %s guifg=%s',
+                    hl_name, ctermfg, style.attrs, gui_color))
+            end
+        end
+
+        -- Standalone style highlights
+        vim.cmd('highlight AnsiBold cterm=bold gui=bold')
+        vim.cmd('highlight AnsiItalic cterm=italic gui=italic')
+        vim.cmd('highlight AnsiUnderline cterm=underline gui=underline')
+        vim.cmd('highlight AnsiStrike cterm=strikethrough gui=strikethrough')
+    end)
+
+end
+
+-- Initialize keymap for new buffer
+local function initialize_keymaps()
+    -- Keymap to close the output window
+    vim.keymap.set('n', 'q', function()
+        if vim.api.nvim_win_is_valid(output_window) then
+            vim.api.nvim_win_close(output_window, true)
+            output_window = nil
+        end
+    end, { buffer = output_buffer, desc = 'Close Run Output Window' })
+
+    -- Set up keymap for navigating to file:line under cursor
+    vim.keymap.set('n', '<CR>', function()
+        local line = vim.api.nvim_win_get_cursor(0)[1] - 1
+        if navigation_marks[line] then
+            local mark = navigation_marks[line]
+            local target_buf = vim.fn.bufnr(mark.file)
+
+            -- Check if file is already open in a window
+            if target_buf ~= -1 then
+                for _, win in ipairs(vim.api.nvim_list_wins()) do
+                    if vim.api.nvim_win_get_buf(win) == target_buf then
+                        vim.api.nvim_set_current_win(win)
+                        vim.api.nvim_win_set_cursor(win, {mark.line, 0})
+                        return
+                    end
+                end
+            end
+
+            -- File not open, edit it in current window
+            vim.cmd('edit ' .. vim.fn.fnameescape(mark.file))
+            vim.api.nvim_win_set_cursor(0, {mark.line, 0})
+        end
+    end, { buffer = output_buffer, desc = 'Go to file:line under cursor' })
+
+    -- Navigate to next location mark
+    vim.keymap.set('n', ']', function()
+        local cur_line = vim.api.nvim_win_get_cursor(0)[1] - 1
+        local next_line = nil
+        for line_num, _ in pairs(navigation_marks) do
+            if line_num > cur_line and (next_line == nil or line_num < next_line) then
+                next_line = line_num
+            end
+        end
+        if next_line then
+            vim.api.nvim_win_set_cursor(0, {next_line + 1, 0})
+        end
+    end, { buffer = output_buffer, desc = 'Go to next location mark' })
+
+    -- Navigate to previous location mark
+    vim.keymap.set('n', '[', function()
+        local cur_line = vim.api.nvim_win_get_cursor(0)[1] - 1
+        local prev_line = nil
+        for line_num, _ in pairs(navigation_marks) do
+            if line_num < cur_line and (prev_line == nil or line_num > prev_line) then
+                prev_line = line_num
+            end
+        end
+        if prev_line then
+            vim.api.nvim_win_set_cursor(0, {prev_line + 1, 0})
+        end
+    end, { buffer = output_buffer, desc = 'Go to previous location mark' })
+
+    -- Keymap to re-run last command
+    vim.keymap.set('n', 'r', function()
+        rerun_last_command()
+    end, { buffer = output_buffer, desc = 'Re-run last command' })
+
+    -- Keymap to kill running command
+    vim.keymap.set('n', 'k', function()
+        kill_running_job()
+    end, { buffer = output_buffer, desc = 'Kill running command' })
+end
+
+--- Initialize or clear the output buffer
+local function initialize_buffer()
+    --- Safely delete output buffer
+    for _, buf in ipairs(vim.api.nvim_list_bufs()) do
+        if vim.api.nvim_buf_is_loaded(buf) then
+            if is_output_buffer(buf) then
+                vim.api.nvim_buf_delete(buf, { force = true })
+            end
+        end
     end
+    output_buffer = nil
 
-    vim.bo[state.buf].modifiable = true
+    -- Create a brand new buffer
+    output_buffer = vim.api.nvim_create_buf(true, true)
+    vim.bo[output_buffer].buftype = 'nofile'
+    vim.bo[output_buffer].bufhidden = 'hide'
+    vim.bo[output_buffer].swapfile = false
+    vim.api.nvim_buf_set_name(output_buffer, BUFFER_NAME)
 
-    for _, line in ipairs(lines) do
-      if line ~= '' then
-        local clean_line = strip_ansi(line)
-        vim.api.nvim_buf_set_lines(state.buf, -1, -1, false, { clean_line })
-      end
-    end
+    -- Setup syntax highlighting and keymaps for the buffer
+    initialize_syntax_highlighting()
+    -- Setup keymaps for the buffer
+    initialize_keymaps()
 
-    vim.bo[state.buf].modifiable = false
+    -- Clear any existing content
+    vim.bo[output_buffer].modifiable = true
+    vim.api.nvim_buf_set_lines(output_buffer, 0, -1, false, { '@ ' .. vim.fn.getcwd(), '' })
+    vim.bo[output_buffer].modifiable = false
+end
 
-    -- Auto-scroll to bottom
-    if vim.api.nvim_win_is_valid(state.win) then
-      local line_count = vim.api.nvim_buf_line_count(state.buf)
-      pcall(vim.api.nvim_win_set_cursor, state.win, { line_count, 0 })
-    end
-  end)
+
+--- Update buffer with new output lines
+local function update_output(data)
+    if not data or #data == 0 then return end
+
+    vim.schedule(function()
+        if not vim.api.nvim_buf_is_valid(output_buffer) then return end
+
+        vim.bo[output_buffer].modifiable = true
+
+        for idx, chunk in ipairs(data) do
+            local clean_chunk, highlights = process_ansi(chunk)
+            local line, line_num
+            local offset = 0
+
+            if idx == 1 then
+                local last_line = vim.api.nvim_buf_get_lines(output_buffer, -2, -1, false)[1] or ''
+                offset = #last_line
+                line = last_line .. clean_chunk
+                vim.api.nvim_buf_set_lines(output_buffer, -2, -1, false, { line })
+            else
+                line = clean_chunk
+                vim.api.nvim_buf_set_lines(output_buffer, -1, -1, false, { line })
+            end
+
+            line_num = vim.api.nvim_buf_line_count(output_buffer) - 1
+            -- Search for file:line patterns and set navigation marks
+            search_locations(line, line_num)
+
+            -- Apply highlight ranges (offset by existing line length if appending)
+            for _, hl in ipairs(highlights) do
+                vim.api.nvim_buf_set_extmark(output_buffer, ansi_namespace, line_num, hl.start + offset, {
+                    end_col = hl.stop + offset,
+                    hl_group = hl.hl,
+                })
+            end
+        end
+
+        vim.bo[output_buffer].modifiable = false
+
+        -- Auto-scroll to bottom
+        if vim.api.nvim_win_is_valid(output_window) then
+            vim.api.nvim_win_set_cursor(output_window, { vim.api.nvim_buf_line_count(output_buffer), 0 })
+        end
+    end)
+end
+
+--- Function called when command is completed
+local function on_complete(job_id, exit_code)
+    update_output({ '', '', string.format('[Process exited with code %d]', exit_code) })
+    running_job = nil
 end
 
 -- ============================================================================
@@ -292,128 +504,45 @@ end
 -- ============================================================================
 
 --- Execute a shell command asynchronously with live output
----@param cmd string
-local function run_command(cmd)
-  -- Stop any running job before starting new one
-  kill_job()
+run_command = function(cmd)
+    -- Stop any running job before starting new one
+    kill_running_job()
+    -- Prepare output buffer for new command
+    initialize_buffer()
+    -- Initialize and display output window
+    show_window()
 
-  state.last_cmd = cmd
-  prepare_window()
-
-  -- Add command header
-  vim.bo[state.buf].modifiable = true
-  vim.api.nvim_buf_set_lines(state.buf, 0, 0, false, {'@ ' .. vim.fn.getcwd(), '$ ' .. cmd, '' })
-  vim.bo[state.buf].modifiable = false
-
-  -- Start async job
-  state.job = vim.fn.jobstart(cmd, {
-    on_stdout = function(_, data)
-      append_output(data)
-    end,
-    on_stderr = function(_, data)
-      append_output(data)
-    end,
-    on_exit = function(job_id, exit_code)
-      -- If we intentionally killed this job, show a killed message even if a new job started
-      if state.killed_job == job_id then
-        state.killed_job = nil
-        vim.schedule(function()
-          if not vim.api.nvim_buf_is_valid(state.buf) then
-            return
-          end
-          vim.bo[state.buf].modifiable = true
-          vim.api.nvim_buf_set_lines(state.buf, -1, -1, false, {
-            '',
-            '[Process killed]',
-          })
-          vim.bo[state.buf].modifiable = false
-        end)
-        -- Do not clear state.job here; it may have been overwritten by a new run
-        if state.job == job_id then
-          state.job = nil
-        end
-        return
-      end
-
-      -- Ignore exit from an older job if a new one has already started
-      if state.job ~= job_id then
-        return
-      end
-
-      vim.schedule(function()
-        if not vim.api.nvim_buf_is_valid(state.buf) then
-          return
-        end
-
-        vim.bo[state.buf].modifiable = true
-        vim.api.nvim_buf_set_lines(state.buf, -1, -1, false, {
-          '',
-          string.format('[Process exited with code %d]', exit_code),
-        })
-        vim.bo[state.buf].modifiable = false
-      end)
-      state.job = nil
-    end,
-  })
-end
-
---- Recompile - run the last command again
-recompile = function()
-  if state.last_cmd then
-    run_command(state.last_cmd)
-  else
-    vim.notify('No previous command to recompile', vim.log.levels.WARN)
-  end
+    -- Store last command
+    last_command = cmd
+    -- Reset navigation marks
+    navigation_marks = {}
+    -- Initialize content
+    update_output({ '$ ' .. cmd, '', ''})
+    -- Start async job
+    running_job = vim.fn.jobstart(cmd, {
+        on_stdout = function(_, data) update_output(data) end,
+        on_stderr = function(_, data) update_output(data) end,
+        on_exit = on_complete,
+    })
 end
 
 -- ============================================================================
--- User Commands and Keymaps
+-- User Interface
 -- ============================================================================
 
---- Custom completion for Run command (shell commands + files)
----@param arglead string
----@return string[]
-local function complete_run_command(arglead)
-  local cmds = vim.fn.getcompletion(arglead, 'shellcmd')
-  local files = vim.fn.getcompletion(arglead, 'file')
-
-  -- Combine without duplicates (commands first, then files)
-  local seen = {}
-  local result = {}
-
-  for _, cmd in ipairs(cmds) do
-    result[#result + 1] = cmd
-    seen[cmd] = true
-  end
-
-  for _, file in ipairs(files) do
-    if not seen[file] then
-      result[#result + 1] = file
-    end
-  end
-
-  return result
-end
-
-vim.api.nvim_create_user_command('Run', function(opts)
-  local cmd = opts.args
-
-  if cmd == '' then
-    vim.ui.input({
-      prompt = 'Command: ',
-      completion = 'file',
-    }, function(input)
-      if input and input ~= '' then
-        run_command(input)
-      end
-    end)
-  else
+vim.api.nvim_create_user_command('Run',
+  function(opts)
+    local cmd = opts.args
+    -- Do nothing for empty command
+    if cmd == '' then return end
+    -- Run the command
     run_command(cmd)
-  end
-end, {
-  nargs = '*',
-  complete = complete_run_command,
-  desc = 'Run command in background with live output',
-})
+  end,
+  {
+    nargs = '*',
+    complete = complete_run_command,
+    desc = 'Run command in background with live output',
+  }
+)
 
 vim.keymap.set('n', '<leader>r', ':Run ', { noremap = true, desc = 'Run command' })
