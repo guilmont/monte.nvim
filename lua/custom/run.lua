@@ -203,32 +203,73 @@ local function get_ansi_highlight(code)
     end
 end
 
---- Process ANSI codes and apply highlighting
-local function process_ansi(line)
+--- Parse terminal control sequences (SGR/CSI/OSC/CR) and apply highlighting
+local function parse_terminal_sequences(line)
     local clean_text = ''
     local highlights = {}
     local current_hl = current_ansi_state
     local pos = 0
     local hl_start = current_hl and 0 or nil
 
-    -- Strip all ANSI codes and track positions
+    -- Strip ANSI codes, carriage returns, and track positions
     local i = 1
     while i <= #line do
-        if line:byte(i) == 27 and line:sub(i+1, i+1) == '[' then
-            -- Found ANSI escape sequence
-            local m_pos = line:find('m', i + 2, true)
-            if m_pos then
-                -- Close previous highlight
-                if current_hl and hl_start then
-                    table.insert(highlights, {hl = current_hl, start = hl_start, stop = pos})
+        local byte = line:byte(i)
+        -- Handle carriage return (CR, ^M): ignore to avoid rendering artifacts
+        if byte == 13 then
+            i = i + 1
+        elseif byte == 27 and line:sub(i + 1, i + 1) == '[' then
+            -- Found ANSI CSI sequence: ESC [ params final
+            local rest = line:sub(i + 2)
+            local letter_pos = rest:find('%a')
+            if letter_pos then
+                local final = rest:sub(letter_pos, letter_pos)
+                local params = rest:sub(1, letter_pos - 1)
+
+                if final == 'm' then
+                    -- Close previous highlight range before style change
+                    if current_hl and hl_start then
+                        table.insert(highlights, { hl = current_hl, start = hl_start, stop = pos })
+                    end
+                    -- Parse SGR parameters and update style state
+                    local code = params
+                    current_hl = (code == '0' or code == '') and nil or get_ansi_highlight(code)
+                    hl_start = current_hl and pos or nil
+                else
+                    -- Non-SGR CSI (e.g., K to erase line, cursor moves, etc.)
+                    -- Ignore sequence: do not emit literal text and keep style state.
                 end
-                -- Parse code and update state
-                local code = line:sub(i + 2, m_pos - 1)
-                current_hl = (code == '0' or code == '') and nil or get_ansi_highlight(code)
-                hl_start = current_hl and pos or nil
-                i = m_pos + 1
+
+                local end_pos = i + 1 + letter_pos
+                i = end_pos + 1
             else
+                -- Malformed CSI, skip ESC
                 i = i + 1
+            end
+        elseif byte == 27 and line:sub(i + 1, i + 1) == ']' then
+            -- Handle OSC (Operating System Command) sequences, e.g., OSC 8 hyperlinks
+            -- Format: ESC ] ... BEL (0x07) OR ESC \ (String Terminator)
+            local j = i + 2
+            local consumed = false
+            while j <= #line do
+                local b = line:byte(j)
+                if b == 7 then
+                    -- BEL terminator
+                    i = j + 1
+                    consumed = true
+                    break
+                elseif b == 27 and j + 1 <= #line and line:sub(j + 1, j + 1) == '\\' then
+                    -- ESC \ terminator
+                    i = j + 2
+                    consumed = true
+                    break
+                else
+                    j = j + 1
+                end
+            end
+            if not consumed then
+                -- Reached end without terminator; drop the remainder
+                i = j
             end
         else
             -- Regular character
@@ -240,7 +281,7 @@ local function process_ansi(line)
 
     -- Close final highlight
     if current_hl and hl_start then
-        table.insert(highlights, {hl = current_hl, start = hl_start, stop = pos})
+        table.insert(highlights, { hl = current_hl, start = hl_start, stop = pos })
     end
 
     current_ansi_state = current_hl
@@ -468,7 +509,7 @@ local function update_output(data)
         vim.bo[output_buffer].modifiable = true
 
         for idx, chunk in ipairs(data) do
-            local clean_chunk, highlights = process_ansi(chunk)
+            local clean_chunk, highlights = parse_terminal_sequences(chunk)
             local line, line_num
             local offset = 0
 
@@ -530,11 +571,15 @@ run_command = function(cmd)
     -- Initialize content
     update_output({ '$ ' .. cmd, '', ''})
     -- Start async job
-    running_job = vim.fn.jobstart(cmd, {
+    local job_opts = {
+        -- Allocate a PTY so tools think they're in a real terminal
+        -- and emit ANSI colors (helps Cargo, npm, etc.)
+        pty = true,
         on_stdout = function(_, data) update_output(data) end,
         on_stderr = function(_, data) update_output(data) end,
         on_exit = on_complete,
-    })
+    }
+    running_job = vim.fn.jobstart(cmd, job_opts)
 end
 
 -- ============================================================================
