@@ -247,18 +247,29 @@ local function process_ansi(line)
     return clean_text, highlights
 end
 
---- Search for file:line patterns and set navigation marks
+--- Search for file:line or file:line:col patterns and set navigation marks
 local function search_locations(line, line_num)
-    local pattern = '([^%s:]+):(%d+)'  -- Match filename_or_path:number (no extension required)
     local pos = 1
     while pos <= #line do
-        local s, e, file, lineno = line:find(pattern, pos)
-        if not s then break end
+        -- Try matching file:line:col first
+        local s, e, file, lineno, colno = line:find('([^%s:]+):(%d+):(%d+)', pos)
+
+        -- If no match with column, try without column
+        if not s then
+            s, e, file, lineno = line:find('([^%s:]+):(%d+)', pos)
+            colno = nil
+        end
+
+        if not s then break; end
 
         local abs_path = vim.fn.fnamemodify(file, ':p')
         if vim.fn.filereadable(abs_path) == 1 then
-            navigation_marks[line_num] = { file = abs_path, line = tonumber(lineno) }
-            -- Highlight the file:line pattern (0-based column indexing)
+            navigation_marks[line_num] = {
+                file = abs_path,
+                line = tonumber(lineno),
+                col = colno and tonumber(colno) or 0
+            }
+            -- Highlight the file:line[:col] pattern (0-based column indexing)
             vim.api.nvim_buf_set_extmark(output_buffer, ansi_namespace, line_num, s - 1, {
                 end_col = e,
                 hl_group = 'Directory',
@@ -365,7 +376,7 @@ local function initialize_keymaps()
                 for _, win in ipairs(vim.api.nvim_list_wins()) do
                     if vim.api.nvim_win_get_buf(win) == target_buf then
                         vim.api.nvim_set_current_win(win)
-                        vim.api.nvim_win_set_cursor(win, {mark.line, 0})
+                        vim.api.nvim_win_set_cursor(win, {mark.line, mark.col})
                         return
                     end
                 end
@@ -373,9 +384,9 @@ local function initialize_keymaps()
 
             -- File not open, edit it in current window
             vim.cmd('edit ' .. vim.fn.fnameescape(mark.file))
-            vim.api.nvim_win_set_cursor(0, {mark.line, 0})
+            vim.api.nvim_win_set_cursor(0, {mark.line, mark.col})
         end
-    end, { buffer = output_buffer, desc = 'Go to file:line under cursor' })
+    end, { buffer = output_buffer, desc = 'Go to file:line:col under cursor' })
 
     -- Navigate to next location mark
     vim.keymap.set('n', ']', function()
