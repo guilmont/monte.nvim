@@ -147,6 +147,8 @@ local ansi_namespace = nil
 local current_ansi_state = nil  -- Tracks ANSI state across lines
 local navigation_marks = {}  -- Maps line numbers to file locations
 
+local has_carriage_return = false -- Used for overwrite detection
+
 -- ============================================================================
 -- Utility Functions
 -- ============================================================================
@@ -213,10 +215,12 @@ local function parse_terminal_sequences(line)
 
     -- Strip ANSI codes, carriage returns, and track positions
     local i = 1
+    local has_cr = false
     while i <= #line do
         local byte = line:byte(i)
-        -- Handle carriage return (CR, ^M): ignore to avoid rendering artifacts
+        -- Handle carriage return (CR, ^M, \r): ignore to avoid rendering artifacts
         if byte == 13 then
+            has_cr = true
             i = i + 1
         elseif byte == 27 and line:sub(i + 1, i + 1) == '[' then
             -- Found ANSI CSI sequence: ESC [ params final
@@ -285,7 +289,7 @@ local function parse_terminal_sequences(line)
     end
 
     current_ansi_state = current_hl
-    return clean_text, highlights
+    return clean_text, highlights, has_cr
 end
 
 --- Search for file:line or file:line:col patterns and set navigation marks
@@ -506,24 +510,27 @@ local function update_output(data)
     vim.schedule(function()
         if not vim.api.nvim_buf_is_valid(output_buffer) then return end
 
+        -- Go thru each chunk of new data
         vim.bo[output_buffer].modifiable = true
-
         for idx, chunk in ipairs(data) do
-            local clean_chunk, highlights = parse_terminal_sequences(chunk)
-            local line, line_num
             local offset = 0
+            local line, highlights, has_cr = parse_terminal_sequences(chunk)
 
             if idx == 1 then
-                local last_line = vim.api.nvim_buf_get_lines(output_buffer, -2, -1, false)[1] or ''
-                offset = #last_line
-                line = last_line .. clean_chunk
+                if not has_carriage_return then
+                    local last_line = vim.api.nvim_buf_get_lines(output_buffer, -2, -1, false)[1] or ''
+                    line = last_line .. line
+                    offset = #last_line
+                end
+
                 vim.api.nvim_buf_set_lines(output_buffer, -2, -1, false, { line })
             else
-                line = clean_chunk
                 vim.api.nvim_buf_set_lines(output_buffer, -1, -1, false, { line })
             end
+            -- Update carriage return state for next input data
+            has_carriage_return = has_cr
 
-            line_num = vim.api.nvim_buf_line_count(output_buffer) - 1
+            local line_num = vim.api.nvim_buf_line_count(output_buffer) - 1
             -- Search for file:line patterns and set navigation marks
             search_locations(line, line_num)
 
