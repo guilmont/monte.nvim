@@ -4,11 +4,89 @@
 -- SIMPLE FILE OPERATIONS (outside window)
 -- ============================================================================
 
+-- Shared state and buffer naming
+local State = nil
+local BUFFER_NAME = 'Perforce Window'
+local BufferViews = {}
+
+-- Forward declarations for functions used before they're defined
+local get_client_info
+local get_all_changelists
+local build_display_lines
+local apply_syntax_highlighting
+local update_display
+
+-- Initial empty state
+local function get_initial_state()
+  return {
+    client = {},
+    changelists = {},
+    window = {},
+  }
+end
+
 -- Perforce uses url encoding for special characters in paths
 -- This function decodes such strings
 -- E.g. %20 -> space, %23 -> #, %40 -> @
 local function url_decode(str)
   return str:gsub('%%(%x%x)', function(hex) return string.char(tonumber(hex, 16)) end)
+end
+
+local function set_buffer_lines(buf, lines)
+  vim.api.nvim_buf_set_option(buf, 'modifiable', true)
+  vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+  apply_syntax_highlighting(buf)
+  vim.api.nvim_buf_set_option(buf, 'modifiable', false)
+end
+
+local function find_existing_buffer()
+  for _, buf in ipairs(vim.api.nvim_list_bufs()) do
+    if vim.api.nvim_buf_is_valid(buf) then
+      local name = vim.api.nvim_buf_get_name(buf)
+      local stem = vim.fn.fnamemodify(name, ':t')
+      if stem == BUFFER_NAME then
+        return buf
+      end
+    end
+  end
+end
+
+local function ensure_buffer()
+  local buf = find_existing_buffer()
+  if buf and vim.api.nvim_buf_is_valid(buf) then
+    return buf
+  end
+  buf = vim.api.nvim_create_buf(true, false)
+  vim.api.nvim_buf_set_name(buf, BUFFER_NAME)
+  vim.bo[buf].bufhidden = 'hide'
+  vim.bo[buf].swapfile = false
+  vim.bo[buf].buftype = 'nofile'
+  vim.bo[buf].readonly = true
+  vim.api.nvim_buf_set_option(buf, 'modifiable', false)
+  return buf
+end
+
+local function render_into(win, buf)
+  -- Use stored view for this buffer if available
+  local view = BufferViews[buf]
+
+  State = get_initial_state()
+  State.client = get_client_info()
+  State.changelists = get_all_changelists()
+  State.window = { win = win, buf = buf }
+
+  local lines, index_map = build_display_lines()
+  State.window.index_map = index_map
+  set_buffer_lines(buf, lines)
+
+  if view and win and vim.api.nvim_win_is_valid(win) then
+    -- Clamp line to new buffer length
+    local max_line = math.max(1, #lines)
+    if view.lnum and view.lnum > max_line then view.lnum = max_line end
+    vim.api.nvim_win_call(win, function()
+      pcall(vim.fn.winrestview, view)
+    end)
+  end
 end
 -- End the way back
 -- This function encodes special characters in paths
@@ -49,6 +127,53 @@ local function p4_cmd(args)
   return result
 end
 
+-- Resolve a depot path to a local filesystem path using `p4 where`.
+local function depot_to_local(depot_path)
+  if not depot_path or depot_path == '' then return '' end
+  local ok, where = pcall(p4_cmd, { cmd = '-ztag where ', filepath = depot_path })
+  if not ok or not where then return '' end
+  for _, line in ipairs(where) do
+    local path = line:match('^%.%.%. path%s+(.+)$')
+    if path and path ~= '' then return path end
+  end
+  return ''
+end
+
+-- Batch resolve multiple depot paths to local paths using a single `p4 where` call.
+-- Returns a table mapping depot_path -> local_path
+local function batch_depot_to_local(depot_paths)
+  if not depot_paths or #depot_paths == 0 then return {} end
+
+  -- Build command with all depot paths
+  local cmd = 'p4 -ztag where'
+  for _, depot_path in ipairs(depot_paths) do
+    cmd = cmd .. ' ' .. url_encode(vim.fn.shellescape(depot_path))
+  end
+
+  local ok, result = pcall(vim.fn.systemlist, cmd)
+  if not ok or vim.v.shell_error ~= 0 then return {} end
+
+  -- Parse the tagged output
+  local mapping = {}
+  local current_depot, current_path
+  for _, line in ipairs(result) do
+    line = url_decode(line)
+    local depot = line:match('^%.%.%. depotFile%s+(.+)$')
+    if depot then
+      current_depot = depot
+      current_path = nil
+    else
+      local path = line:match('^%.%.%. path%s+(.+)$')
+      if path and current_depot then
+        current_path = path
+        mapping[current_depot] = current_path
+      end
+    end
+  end
+
+  return mapping
+end
+
 local function p4_edit()
   local file = vim.fn.expand('%:p')
   local result = p4_cmd({cmd = 'edit ', filepath = file})
@@ -69,15 +194,16 @@ end
 local function p4_revert()
   local file = vim.fn.expand('%:p')
   vim.ui.input(
-    { prompt = 'Revert ' .. vim.fn.expand('%') .. '? (y/N): ' },
+    { prompt = 'Revert ' .. file .. '? (y/N): ' },
     function(input)
       if not (input and input:lower() == 'y') then return end
-      -- Revert file
       local result = p4_cmd({cmd = 'revert ', filepath = file})
       if result then
         vim.notify('P4: ' .. result[1], vim.log.levels.INFO)
-        vim.cmd('checktime')
-        vim.bo.readonly = true
+        vim.cmd('edit')
+        if State and State.window and State.window.win and vim.api.nvim_win_is_valid(State.window.win) then
+          update_display(true)
+        end
       end
     end)
 end
@@ -85,14 +211,16 @@ end
 local function p4_delete()
   local file = vim.fn.expand('%:p')
   vim.ui.input(
-    { prompt = 'Delete ' .. vim.fn.fnamemodify(file, ':t') .. '? (y/N): ' },
+    { prompt = 'Delete ' .. file .. '? (y/N): ' },
     function(input)
       if not (input and input:lower() == 'y') then return end
-      -- Delete file
       local result = p4_cmd({cmd = 'delete ', filepath = file})
       if result then
-        vim.cmd('bd!')  -- Close buffer
+        vim.cmd('bd!')
         vim.notify('P4: File marked for delete', vim.log.levels.INFO)
+        if State and State.window and State.window.win and vim.api.nvim_win_is_valid(State.window.win) then
+          update_display(true)
+        end
       end
     end)
 end
@@ -225,22 +353,11 @@ end
 -- PERFORCE WINDOW
 -- ===========================================================================
 
--- Perforce data
-local State = nil;
-
-local function get_initial_state()
-return {
-  client = {},
-  changelists = {},
-  window = {},
-}
-end
-
 -- DATA FETCHING -------------------------------------------------------------
 
-local function get_client_info()
+function get_client_info()
   local client_info = p4_cmd({cmd = 'info'})
-  local client_name, client_root, client_stream
+  local client_name, client_root
   for _, line in ipairs(client_info) do
     if not client_name then
       client_name = line:match('^Client name:%s+(.+)$')
@@ -248,109 +365,225 @@ local function get_client_info()
     if not client_root then
       client_root = line:match('^Client root:%s+(.+)$')
     end
-    if not client_stream then
-      client_stream = line:match('^Client stream:%s+(.+)$')
-    end
-    -- Break early if all info found
-    if client_name and client_root and client_stream then break end
+    if client_name and client_root then break end
   end
 
-  -- Ensure that all data was found
-  if client_name and client_root and client_stream then
-    return {
-      name = client_name,
-      root = client_root,
-      stream = client_stream,
-    }
-  end
-  -- Error out if incomplete
-  error('Failed to retrieve complete Perforce client info')
+  return {
+    name = client_name or '',
+    root = client_root or '',
+  }
 end
 
-local function get_changelist_description(cl)
+local function get_changelist_extended_info(cl)
   -- Nothing to do for default changelist
-  if cl == 'default' then return 'Default changelist' end
+  if cl == 'default' then
+    return {
+      description = 'Default changelist',
+      jobs = {},
+    }
+  end
 
-  local change_info = p4_cmd({cmd = 'change -o ' .. cl})
-  if not change_info then
+  local describe_output = p4_cmd({cmd = 'describe ' .. cl})
+  if not describe_output then
     error('Failed to get changelist info for CL ' .. cl)
   end
 
-  local in_desc = false
-  for _, line in ipairs(change_info) do
-    if line:match('^Description:') then
-      in_desc = true
-    elseif in_desc and line:match('^%s+') then
-      return line:match('^%s+(.*)')
+  local description_lines = {}
+  local jobs = {}
+  local in_jobs = false
+
+  -- Parse describe output
+  for _, line in ipairs(describe_output) do
+    -- Detect start of jobs section
+    if line:match('^Jobs fixed') then
+      in_jobs = true
+    -- Detect end of jobs section (start of affected files)
+    elseif line:match('^Affected files') then
+      in_jobs = false
+      break
+    elseif in_jobs then
+      -- Parse job lines: they DON'T start with "..." (those are files)
+      -- Job lines look like: "g3985598 on 2025/12/20 by ohaddad *open*"
+      if not line:match('^%.%.%.') and not line:match('^%s*$') then
+        if not line:match('^%s+') then
+          -- This is a job ID line (not indented)
+          local job_id = line:match('^(%S+)')
+          if job_id then
+            table.insert(jobs, {
+              id = job_id,
+              line = line
+            })
+          end
+        elseif #jobs > 0 then
+          -- Job description lines (indented)
+          local last_job = jobs[#jobs]
+          if not last_job.description then
+            last_job.description = line:match('^%s+(.*)')
+          end
+        end
+      end
+    elseif not in_jobs then
+      -- Collect all description lines (indented with tabs/spaces)
+      if line:match('^%s+%S') then
+        local desc_line = line:match('^%s+(.*)')
+        if desc_line then
+          table.insert(description_lines, desc_line)
+        end
+      end
     end
   end
-  -- If we reach here, the change list doesn't have a description
-  return '(no description)'
+
+  return {
+    description_lines = #description_lines > 0 and description_lines or {'(no description)'},
+    jobs = jobs,
+  }
 end
 
-local function get_all_changelists()
+function get_all_changelists()
   local file_map = {}
-  --  Get all changes for the current client
+  local cl_numbers = {}
+
+  -- Get all pending changelists for the current client
   local changes_output = p4_cmd({cmd = 'changes -s pending -c ' .. vim.fn.shellescape(State.client.name)})
   for _, line in ipairs(changes_output) do
     local change_number = line:match('^Change (%d+)')
     if change_number then
+      table.insert(cl_numbers, change_number)
       file_map[change_number] = {
-        description = get_changelist_description(change_number),
-        shelved_files= {},
+        description_lines = {},
+        jobs = {},
+        shelved_files = {},
         opened_files = {},
         expand_shelf = false,
       }
     end
   end
+
+  -- Batch describe all changelists in one call to get descriptions, jobs, and shelves
+  if #cl_numbers > 0 then
+    local describe_cmd = 'describe -s -S ' .. table.concat(cl_numbers, ' ')
+    local describe_output = p4_cmd({cmd = describe_cmd})
+
+    local current_cl
+    local in_description = false
+    local in_jobs = false
+    local in_shelved = false
+
+    for _, line in ipairs(describe_output) do
+      -- Detect changelist boundary
+      local cl = line:match('^Change (%d+)')
+      if cl then
+        current_cl = cl
+        in_description = true
+        in_jobs = false
+        in_shelved = false
+      -- Detect jobs section
+      elseif line:match('^Jobs fixed') then
+        in_description = false
+        in_jobs = true
+        in_shelved = false
+      -- Detect shelved files section
+      elseif line:match('^Shelved files') then
+        in_description = false
+        in_jobs = false
+        in_shelved = true
+      -- Detect affected files section (end of useful data for this CL)
+      elseif line:match('^Affected files') then
+        in_description = false
+        in_jobs = false
+        in_shelved = false
+      -- Parse content based on current section
+      elseif current_cl and file_map[current_cl] then
+        if in_description and line:match('^%s+%S') then
+          local desc_line = line:match('^%s+(.*)')
+          if desc_line then
+            table.insert(file_map[current_cl].description_lines, desc_line)
+          end
+        elseif in_jobs then
+          if not line:match('^%.%.%.') and not line:match('^%s*$') then
+            if not line:match('^%s+') then
+              -- Job ID line
+              local job_id = line:match('^(%S+)')
+              if job_id then
+                table.insert(file_map[current_cl].jobs, {
+                  id = job_id,
+                  line = line
+                })
+              end
+            elseif #file_map[current_cl].jobs > 0 then
+              -- Job description line
+              local last_job = file_map[current_cl].jobs[#file_map[current_cl].jobs]
+              if not last_job.description then
+                last_job.description = line:match('^%s+(.*)')
+              end
+            end
+          end
+        elseif in_shelved then
+          local depot_path = line:match('^%.%.%. (//[^#]+)')
+          if depot_path then
+            table.insert(file_map[current_cl].shelved_files, depot_path)
+          end
+        end
+      end
+    end
+
+    -- Set default description for changelists without one
+    for _, cn in ipairs(cl_numbers) do
+      if #file_map[cn].description_lines == 0 then
+        file_map[cn].description_lines = {'(no description)'}
+      end
+    end
+  end
+
   -- Ensure default changelist is included
   if not file_map['default'] then
     file_map['default'] = {
-      description = 'Default changelist',
+      description_lines = {'Default changelist'},
+      jobs = {},
       shelved_files = {},
       opened_files = {}
     }
   end
   -- Search for all opened files and group by changelist
   local files_output = p4_cmd({cmd = 'opened'})
+  local depot_paths = {}
+  local files_data = {}
+
+  -- First pass: collect depot paths and basic file info
   for _, line in ipairs(files_output) do
     local depot_path = line:match('^(//[^#]+)')
     if depot_path then
       local action = line:match('#%d+ %- ([^%s]+)')
       local change_number = line:match('change (%d+)') or 'default'
-      -- Insert file to change_number
-      table.insert(file_map[change_number].opened_files, {
+      table.insert(depot_paths, depot_path)
+      table.insert(files_data, {
         depot_path = depot_path,
         action = action,
-        relative_path = depot_path:gsub(State.client.stream .. '/', ''),
-        filename = depot_path:match('([^/]+)$'),
+        change_number = change_number,
       })
     end
   end
-  --- Now check for shelved files in all changelists
-  for cn, _ in pairs(file_map) do
-    if cn ~= 'default' then
-      local in_shelved = false
-      local shelved_output = p4_cmd({cmd = 'describe -s -S ' .. cn})
-      for _, line in ipairs(shelved_output) do
-        if line:match('^Shelved files') then
-          in_shelved = true
-        elseif in_shelved then
-          local depot_path = line:match('^%.%.%. (//[^#]+)')
-          if depot_path then
-            table.insert(file_map[cn].shelved_files, depot_path)
-          end
-        end
-      end
-    end
+
+  -- Batch resolve all depot paths to local paths in one p4 call
+  local path_mapping = batch_depot_to_local(depot_paths)
+
+  -- Second pass: add files with resolved local paths to changelists
+  for _, file_data in ipairs(files_data) do
+    local local_path = path_mapping[file_data.depot_path] or ''
+    table.insert(file_map[file_data.change_number].opened_files, {
+      depot_path = file_data.depot_path,
+      action = file_data.action,
+      local_path = local_path,
+    })
   end
+
   -- Return the complete changelist file map
   return file_map
 end
 
 -- DISPLAY RENDERING ------------------------------------------------------------
 
-local function build_display_lines()
+function build_display_lines()
   if not State then
     error('State is not initialized when building display')
   end
@@ -359,16 +592,58 @@ local function build_display_lines()
   local index_map = {}
   for cn, content in pairs(State.changelists) do
     -- CL header line
-    local file_count = #content.opened_files
-    local count_str = file_count > 0
-      and string.format(' (%d file%s)', file_count, file_count ~= 1 and 's' or '')
-      or ' (empty)'
-    table.insert(lines, string.format('CL %s: %s%s', cn, content.description, count_str))
+    table.insert(lines, string.format('CL %s :', cn))
     table.insert(index_map, { type = 'changelist', change_number = cn })
+
+    -- All description lines indented
+    for _, desc_line in ipairs(content.description_lines) do
+      table.insert(lines, string.format('  %s', desc_line))
+      table.insert(index_map, { type = 'description_line', change_number = cn })
+    end
+
+    -- Jobs section (if available)
+    if content.jobs and #content.jobs > 0 then
+      table.insert(lines, '')
+      table.insert(index_map, { type = 'separator' })
+      table.insert(lines, '  Jobs')
+      table.insert(index_map, { type = 'jobs_header', change_number = cn })
+      for _, job in ipairs(content.jobs) do
+        table.insert(lines, string.format('    (%s) %s', job.id, job.description or job.line))
+        table.insert(index_map, { type = 'job_line', change_number = cn, job_id = job.id })
+      end
+    end
+
+    -- Files section
+    local file_count = #content.opened_files
+    if file_count > 0 then
+      table.insert(lines, '')
+      table.insert(index_map, { type = 'separator' })
+      local count_str = string.format(' (%d file%s)', file_count, file_count ~= 1 and 's' or '')
+      table.insert(lines, string.format('  Files%s', count_str))
+      table.insert(index_map, { type = 'files_header', change_number = cn })
+      for _, file in ipairs(content.opened_files) do
+        local path_for_display
+        if file.local_path ~= '' then
+          -- Make path relative to client root
+          local root = State.client.root
+          if root ~= '' and file.local_path:sub(1, #root) == root then
+            path_for_display = file.local_path:sub(#root + 2) -- +2 to skip root and trailing slash
+          else
+            path_for_display = file.local_path
+          end
+        else
+          path_for_display = file.depot_path
+        end
+        table.insert(lines, string.format('    %-13s %s', file.action, path_for_display))
+        table.insert(index_map, { type = 'opened_file', change_number = cn, opened_file = file })
+      end
+    end
 
     -- Shelf toggle line
     local shelf_size = #content.shelved_files
     if shelf_size > 0 then
+      table.insert(lines, '')  -- Empty line before shelf
+      table.insert(index_map, { type = 'separator' })  -- Corresponding index_map entry
       local expand_char = content.expand_shelf and '▼' or '▶'
       table.insert(lines, string.format('  %s Shelf (%d file%s)', expand_char, shelf_size, shelf_size ~= 1 and 's' or ''))
       table.insert(index_map, { type = 'shelf_toggle', change_number = cn })
@@ -379,12 +654,6 @@ local function build_display_lines()
           table.insert(index_map, { type = 'shelved_file', change_number = cn, shelved_file = depot_path })
         end
       end
-    end
-
-    -- Opened files
-    for _, file in ipairs(content.opened_files) do
-      table.insert(lines, string.format('  %-13s %s', file.action, file.relative_path))
-      table.insert(index_map, { type = 'opened_file', change_number = cn, opened_file = file })
     end
     -- Empty line separator
     table.insert(lines, '')
@@ -397,7 +666,7 @@ local function build_display_lines()
   return lines, index_map
 end
 
-local function apply_syntax_highlighting(buf)
+function apply_syntax_highlighting(buf)
   -- Clear existing highlights
   vim.api.nvim_buf_clear_namespace(buf, -1, 0, -1)
 
@@ -409,23 +678,44 @@ local function apply_syntax_highlighting(buf)
 
     -- CL header lines
     if line:match('^CL ') then
-      local cl_num_end = line:find(':')
-      if cl_num_end then
-        -- Highlight "CL <number>"
-        vim.api.nvim_buf_add_highlight(buf, ns_id, 'Title', line_idx, 0, cl_num_end - 1)
+      -- Highlight entire CL header line
+      vim.api.nvim_buf_add_highlight(buf, ns_id, 'Title', line_idx, 0, #line)
 
-        -- Highlight count
-        local count_match = line:match('%((%d+ file[s]?)%)')
-        if count_match then
-          local count_start = line:find('%(' .. count_match:gsub('([%^%$%(%)%%%.%[%]%*%+%-%?])', '%%%1'))
-          if count_start then
-            vim.api.nvim_buf_add_highlight(buf, ns_id, 'Number', line_idx, count_start - 1, count_start + #count_match + 1)
-          end
-        elseif line:match('%(empty%)') then
-          local empty_start = line:find('%(empty%)')
-          if empty_start then
-            vim.api.nvim_buf_add_highlight(buf, ns_id, 'Comment', line_idx, empty_start - 1, empty_start + 6)
-          end
+    -- Description lines (indented with 2 spaces)
+    elseif line:match('^  [^%s]') and not line:match('^  Jobs') and not line:match('^  Files') and not line:match('^  [▶▼]') then
+      -- Check for CR: or RB: patterns to apply special highlighting
+      if line:match('CR:') then
+        local cr_start = line:find('CR:')
+        vim.api.nvim_buf_add_highlight(buf, ns_id, 'Keyword', line_idx, cr_start - 1, cr_start + 2)
+      elseif line:match('RB:') then
+        local rb_start = line:find('RB:')
+        vim.api.nvim_buf_add_highlight(buf, ns_id, 'Keyword', line_idx, rb_start - 1, rb_start + 2)
+        vim.api.nvim_buf_add_highlight(buf, ns_id, 'Comment', line_idx, 0, #line)
+      end
+
+    -- Jobs header
+    elseif line:match('^  Jobs$') then
+      vim.api.nvim_buf_add_highlight(buf, ns_id, 'Keyword', line_idx, 0, #line)
+
+    -- Job lines (indented with 4 spaces, starts with parenthesis)
+    elseif line:match('^    %([^%)]+%)') then
+      -- Highlight job ID in parentheses
+      local paren_start = line:find('%(') - 1
+      local paren_end = line:find('%)')
+      if paren_start and paren_end then
+        vim.api.nvim_buf_add_highlight(buf, ns_id, 'Number', line_idx, paren_start, paren_end)
+      end
+
+    -- Files header
+    elseif line:match('^  Files') then
+      vim.api.nvim_buf_add_highlight(buf, ns_id, 'Keyword', line_idx, 0, 7)
+      -- Highlight count
+      local count_match = line:match('%((%d+ file[s]?)%)')
+      if count_match then
+        local count_start = line:find('%(')
+        local count_end = line:find('%)')
+        if count_start and count_end then
+          vim.api.nvim_buf_add_highlight(buf, ns_id, 'Number', line_idx, count_start - 1, count_end)
         end
       end
 
@@ -439,13 +729,9 @@ local function apply_syntax_highlighting(buf)
         vim.api.nvim_buf_add_highlight(buf, ns_id, 'Keyword', line_idx, shelf_start - 1, paren_start - 1)
       end
 
-    -- Shelved file lines
-    elseif line:match('^%s%s%s%s[^%s]') and not line:match('^%s%s[^%s]') then
-      vim.api.nvim_buf_add_highlight(buf, ns_id, 'Directory', line_idx, 0, #line)
-
-    -- File action lines
-    elseif line:match('^%s%s[a-z]+%s+') then
-      local action = line:match('^%s%s([a-z]+)')
+    -- File action lines (indented with 4 spaces)
+    elseif line:match('^    [a-z]+%s+') then
+      local action = line:match('^    ([a-z/]+)')
       if action then
         local hl_group
         if action == 'edit' then
@@ -460,14 +746,18 @@ local function apply_syntax_highlighting(buf)
           hl_group = 'Identifier'
         end
 
-        vim.api.nvim_buf_add_highlight(buf, ns_id, hl_group, line_idx, 2, 2 + #action)
+        vim.api.nvim_buf_add_highlight(buf, ns_id, hl_group, line_idx, 4, 4 + #action)
 
         -- Highlight the filename
-        local file_start = line:find('[^%s]', 13)
+        local file_start = line:find('[^%s]', 18)
         if file_start then
           vim.api.nvim_buf_add_highlight(buf, ns_id, 'String', line_idx, file_start - 1, #line)
         end
       end
+
+    -- Shelved file lines (indented with 4 spaces, depot paths)
+    elseif line:match('^    //') then
+      vim.api.nvim_buf_add_highlight(buf, ns_id, 'Directory', line_idx, 0, #line)
 
     -- Help line
     elseif line:match('^%[.*%]$') then
@@ -476,56 +766,58 @@ local function apply_syntax_highlighting(buf)
   end
 end
 
-local function update_display(refresh_data)
-  -- This is annoying but we have to check validity again for linter to be happy
+function update_display(refresh_data)
   if not (State and State.window.win and vim.api.nvim_win_is_valid(State.window.win)) then
     return
   end
-  -- Optionally refresh data
   if refresh_data then
     State.changelists = get_all_changelists()
   end
 
-  -- Get current cursor position to keep it in place after update
-  local cursor_line = vim.api.nvim_win_get_cursor(State.window.win)
+  local win = State.window.win
+  local buf = vim.api.nvim_win_get_buf(win)
+  local view = BufferViews[buf]
 
-  -- Rebuild display lines and index map
   local lines, index_map = build_display_lines()
   State.window.index_map = index_map
 
-  -- Update buffer content
-  local buf = vim.api.nvim_win_get_buf(State.window.win)
-  vim.api.nvim_buf_set_option(buf, 'modifiable', true)
-  vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
-  apply_syntax_highlighting(buf)
-  vim.api.nvim_buf_set_option(buf, 'modifiable', false)
+  set_buffer_lines(buf, lines)
 
-  -- Update window size and position
-  local width = math.floor(0.9 * vim.o.columns)
-  local height = math.min(#lines, math.floor(0.9 * vim.o.lines))
-  vim.api.nvim_win_set_config(State.window.win, {
-    relative = 'editor',
-    width = width,
-    height = height,
-    row = math.floor((vim.o.lines - height) / 2),
-    col = math.floor((vim.o.columns - width) / 2),
-  })
-
-  -- Restore cursor position
-  local line_count = #lines
-  cursor_line[1] = cursor_line[1] > line_count and line_count or cursor_line[1]
-
-  vim.api.nvim_win_set_cursor(State.window.win, cursor_line)
+  if view then
+    local max_line = math.max(1, #lines)
+    if view.lnum and view.lnum > max_line then view.lnum = max_line end
+    vim.api.nvim_win_call(win, function()
+      pcall(vim.fn.winrestview, view)
+    end)
+  end
 end
 
 -- WINDOW KEYBIND ACTIONS -------------------------------------------------------
 
-local function close_window()
-  if State and State.window.win and vim.api.nvim_win_is_valid(State.window.win) then
-    vim.api.nvim_win_close(State.window.win, true)
-  end
-  State = nil;
-end
+-- Auto-refresh when the Perforce buffer is shown in a window
+vim.api.nvim_create_autocmd('BufWinEnter', {
+  callback = function(args)
+    local name = vim.fn.fnamemodify(vim.api.nvim_buf_get_name(args.buf), ':t')
+    if name == BUFFER_NAME then
+      render_into(vim.api.nvim_get_current_win(), args.buf)
+    end
+  end,
+})
+
+-- Save view when leaving Perforce buffer, to restore on next attach
+vim.api.nvim_create_autocmd('BufWinLeave', {
+  callback = function(args)
+    local name = vim.fn.fnamemodify(vim.api.nvim_buf_get_name(args.buf), ':t')
+    if name == BUFFER_NAME then
+      local win = vim.api.nvim_get_current_win()
+      local view
+      pcall(function()
+        view = vim.fn.winsaveview()
+      end)
+      if view then BufferViews[args.buf] = view end
+    end
+  end,
+})
 
 local function input_action()
   -- Check window validity
@@ -548,10 +840,13 @@ local function input_action()
 
   -- Open file in editor
   elseif data.type == 'opened_file' then
-    vim.api.nvim_win_close(State.window.win, true)
-    local filepath = State.client.root .. '/' .. data.opened_file.relative_path
-    vim.cmd('edit ' .. vim.fn.fnameescape(filepath))
-    close_window()
+    local filepath = depot_to_local(data.opened_file.depot_path)
+    if filepath ~= '' then
+      vim.cmd('edit ' .. vim.fn.fnameescape(filepath))
+      State = nil
+    else
+      vim.notify('P4: Failed to resolve local path for ' .. data.opened_file.depot_path, vim.log.levels.ERROR)
+    end
 
   -- Edit the description of a changelist
   elseif data.type == 'changelist' then
@@ -662,8 +957,9 @@ local function revert_files()
   -- Revert single file
   if data.type == 'opened_file' then
     local file = data.opened_file
+    local name_for_prompt = (file.local_path ~= '' and file.local_path or file.depot_path)
     vim.ui.input(
-      { prompt = 'Revert ' .. file.relative_path .. '? (y/N): ' },
+      { prompt = 'Revert ' .. name_for_prompt .. '? (y/N): ' },
       function(input)
         if not (input and input:lower() == 'y') then return end
         p4_cmd({cmd = 'revert ', filepath = file.depot_path})
@@ -702,7 +998,7 @@ local function move_files()
     local cl_options = {}
     for cn, content in pairs(State.changelists) do
       if cn ~= data.change_number then
-        table.insert(cl_options, string.format('%s: %s', cn, content.description))
+        table.insert(cl_options, string.format('%s: %s', cn, content.description_lines[1]))
       end
     end
     -- Prompt user for target changelist
@@ -833,71 +1129,37 @@ local function show_diff()
   end
 
   if data.type == 'opened_file' then
-    local filepath = State.client.root .. '/' .. data.opened_file.relative_path
-    close_window()
-    vim.cmd('edit ' .. vim.fn.fnameescape(filepath))
-    vim.schedule(function() p4_vdiffsplit(filepath) end)
-  end
-end
-
-local function review_all_opened_files()
-  -- Get all files to review
-  local files_to_open = {}
-  for _, content in pairs(State.changelists) do
-    for _, file in ipairs(content.opened_files) do
-      if not (file.action:match('move/delete') or file.action:match('delete')) then
-        table.insert(files_to_open, State.client.root .. '/' .. file.relative_path)
-      end
-    end
-  end
-  -- Close the window
-  close_window()
-  -- Open each file in its own buffer
-  for _, filepath in ipairs(files_to_open) do
+    local filepath = depot_to_local(data.opened_file.depot_path)
+    if filepath ~= '' then
       vim.cmd('edit ' .. vim.fn.fnameescape(filepath))
+      State = nil
+      vim.schedule(function() p4_vdiffsplit(filepath) end)
+    else
+      vim.notify('P4: Failed to resolve local path for ' .. data.opened_file.depot_path, vim.log.levels.ERROR)
+    end
   end
 end
 
 -- MAIN WINDOW CREATION FUNCTION -------------------------------------------------------
 
 local function show_window()
-  -- Close existing window if it's open
-  close_window()
-
   -- Initialize state
   State = get_initial_state()
   State.client = get_client_info()
   State.changelists = get_all_changelists()
 
-  -- Create display lines and index map for actions
+  -- Build lines and index map
   local lines, index_map = build_display_lines()
-  State.window.index_map = index_map
 
-  -- Create buffer
-  local buf = vim.api.nvim_create_buf(false, true)
+  -- Ensure/reuse named buffer and use current window
+  local win = vim.api.nvim_get_current_win()
+  local buf = ensure_buffer()
+  State.window = { win = win, buf = buf, index_map = index_map }
+  vim.api.nvim_win_set_buf(win, buf)
+  vim.api.nvim_buf_set_option(buf, 'modifiable', true)
   vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
-  vim.api.nvim_buf_set_name(buf, 'P4 Opened Files')
-  vim.api.nvim_buf_set_option(buf, 'modifiable', false)
-  vim.api.nvim_buf_set_option(buf, 'buftype', 'nofile')
-  vim.api.nvim_buf_set_option(buf, 'bufhidden', 'wipe')
-  vim.api.nvim_buf_set_option(buf, 'swapfile', false)
   apply_syntax_highlighting(buf)
-  State.window.buf = buf
-
-  -- Create centered floating window for buffer
-  local width = math.floor(0.9 * vim.o.columns)
-  local height = math.min(#lines, math.floor(0.9 * vim.o.lines))
-  State.window.win = vim.api.nvim_open_win(buf, true, {
-    relative = 'editor',
-    width = width,
-    height = height,
-    row = math.floor((vim.o.lines - height) / 2),
-    col = math.floor((vim.o.columns - width) / 2),
-    style = 'minimal',
-    border = 'rounded',
-    title = ' P4 Opened Files ',
-    title_pos = 'center',
-  })
+  vim.api.nvim_buf_set_option(buf, 'modifiable', false)
 
   -- Keymaps
   local opts = { buffer = buf, nowait = true, noremap = true, silent = true }
@@ -909,10 +1171,6 @@ local function show_window()
   vim.keymap.set('n', 'D', delete_stuff, opts)
   vim.keymap.set('n', 'N', create_changelist, opts)
   vim.keymap.set('n', 'd', show_diff, opts)
-  vim.keymap.set('n', 'A', review_all_opened_files, opts)
-  for _, key in ipairs({'q', '<Esc>'}) do
-      vim.keymap.set('n', key, close_window, opts)
-  end
 end
 
 -- ============================================================================
@@ -926,7 +1184,6 @@ vim.api.nvim_create_user_command('P4Revert', p4_revert, { desc = 'P4: Revert cur
 vim.api.nvim_create_user_command('P4Delete', p4_delete, { desc = 'P4: Delete current file' })
 vim.api.nvim_create_user_command('P4Rename', p4_rename, { desc = 'P4: Rename/move current file' })
 vim.api.nvim_create_user_command('P4Diff', function() p4_vdiffsplit(vim.fn.expand('%:p')) end,  { desc = 'P4: Diff current file' })
-vim.api.nvim_create_user_command('P4ReviewNext', function() vim.cmd('bn | bd #') end, { desc = 'P4: Review next opened file' })
 
 -- Keymaps
 vim.keymap.set('n', '<leader>ps', show_window, { desc = 'P4: Show opened files' })
@@ -936,4 +1193,3 @@ vim.keymap.set('n', '<leader>pr', p4_revert, { desc = 'P4: Revert current file' 
 vim.keymap.set('n', '<leader>pD', p4_delete, { desc = 'P4: Delete current file' })
 vim.keymap.set('n', '<leader>pR', p4_rename, { desc = 'P4: Rename/move current file' })
 vim.keymap.set('n', '<leader>pd', function() p4_vdiffsplit(vim.fn.expand('%:p')) end, { desc = 'P4: Diff current file' })
-vim.keymap.set('n', '<leader>pn', function() vim.cmd('bn | bd #') end, { desc = 'P4: Review next opened file' })
