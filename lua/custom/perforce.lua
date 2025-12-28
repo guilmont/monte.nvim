@@ -742,14 +742,21 @@ local function delete_stuff()
             function(input)
                 if not (input and input:lower() == 'y') then return end
                 -- First revert all opened files
-                p4_cmd({cmd = 'revert -c ' .. cn .. ' //...'})
+                if #CHANGELISTS[cn].opened_files > 0 then
+                    p4_cmd({cmd = 'revert -c ' .. cn .. ' //...'})
+                    vim.cmd('checktime') -- Refresh files in editor if open
+                end
                 -- Then delete all shelved files (if any).
                 if #CHANGELISTS[cn].shelved_files > 0 then
                     p4_cmd({cmd = 'shelve -d -c ' .. cn})
                 end
+                -- Remove all jobs from the changelist
+                for _, job in ipairs(CHANGELISTS[cn].jobs) do
+                    p4_cmd({cmd = 'fix -d -c ' .. cn .. ' ' .. job.id})
+                end
                 -- Finally delete the changelist itself
                 p4_cmd({cmd = 'change -d ' .. cn})
-                show_window()
+                vim.schedule(show_window)
             end
         )
 
