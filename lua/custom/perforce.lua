@@ -457,99 +457,103 @@ end
 
 --- Edit the description of a changelist
 local function edit_changelist_description(cn)
-    -- Get current description lines from CHANGELISTS (already loaded)
-    local current_desc_lines = CHANGELISTS[cn].description_lines
-    if not current_desc_lines or #current_desc_lines == 0 then
-        vim.notify('No description to edit', vim.log.levels.WARN)
-        return
+    -- Get the change spec
+    local change_spec = p4_cmd({cmd = 'change -o' .. (cn ~= 'default' and ' ' .. cn or '')})
+
+    -- Filter out comment lines (starting with #)
+    local filtered_spec = {}
+    for _, line in ipairs(change_spec) do
+        if not line:match('^#') then
+            table.insert(filtered_spec, line)
+        end
     end
 
-    -- Create editor buffer
-    local desc_buf = vim.api.nvim_create_buf(false, true)
-    vim.api.nvim_buf_set_lines(desc_buf, 0, -1, false, current_desc_lines)
-    vim.api.nvim_buf_set_name(desc_buf, 'P4-Description-' .. cn)
-    vim.bo[desc_buf].filetype = 'text'
-    vim.bo[desc_buf].buftype = 'nofile'
-    vim.bo[desc_buf].swapfile = false
+    -- Add documentation header
+    local doc_lines = {
+        '# Perforce Editor',
+        '#',
+        '# Edit the changelist below. When done:',
+        '#   :w   - Save changes to Perforce',
+        '#   :bd!  - Cancel without saving',
+        '#',
+    }
 
-    -- Open floating window
-    local width = math.floor(vim.o.columns * 0.5)
-    local height = math.floor(vim.o.lines * 0.25)
-    local row = math.floor((vim.o.lines - height) / 2 - 1)
-    local col = math.floor((vim.o.columns - width) / 2)
-    local desc_win = vim.api.nvim_open_win(desc_buf, true, {
-        relative = 'editor',
-        width = width,
-        height = height,
-        row = row,
-        col = col,
-        style = 'minimal',
-        border = 'rounded',
-    })
-    -- Start in insert mode
-    vim.cmd('startinsert')
+    -- Combine documentation and spec
+    local buffer_content = {}
+    for _, line in ipairs(doc_lines) do
+        table.insert(buffer_content, line)
+    end
+    for _, line in ipairs(filtered_spec) do
+        table.insert(buffer_content, line)
+    end
 
-    -- Set up keymaps for saving
-    local function save_description()
-        local new_desc_lines = vim.api.nvim_buf_get_lines(desc_buf, 0, -1, false)
-        if vim.deep_equal(new_desc_lines, current_desc_lines) then
-            return
+    -- Create a buffer for editing
+    local buf = vim.api.nvim_create_buf(false, false)
+    vim.bo[buf].bufhidden = 'wipe'
+    vim.bo[buf].swapfile = false
+    vim.bo[buf].filetype = 'conf'
+    vim.api.nvim_buf_set_name(buf, 'P4-Change-' .. cn)
+    vim.api.nvim_buf_set_lines(buf, 0, -1, false, buffer_content)
+    vim.api.nvim_set_current_buf(buf)
+
+    -- Apply syntax highlighting
+    local ns_id = vim.api.nvim_create_namespace('P4ChangeSpec')
+    for i, line in ipairs(buffer_content) do
+        local line_idx = i - 1
+        -- Highlight comments
+        if line:match('^#') then
+            vim.api.nvim_buf_add_highlight(buf, ns_id, 'Comment', line_idx, 0, #line)
+        -- Highlight separator
+        elseif line:match('^%-%-%-') then
+            vim.api.nvim_buf_add_highlight(buf, ns_id, 'Comment', line_idx, 0, #line)
+        -- Highlight field names (e.g., "Change:", "Client:", "Description:")
+        elseif line:match('^%a+:') then
+            local colon_pos = line:find(':')
+            vim.api.nvim_buf_add_highlight(buf, ns_id, 'Keyword', line_idx, 0, colon_pos)
         end
+    end
 
-        -- Get change template from Perforce
-        local change_template = p4_cmd({cmd = 'change -o' .. (cn ~= 'default' and ' ' .. cn or '')})
-
-        -- Parse description section to find indices
-        local desc_start_idx, desc_end_idx = nil, nil
-        for i, line in ipairs(change_template) do
-            if line:match('^Description:') then
-                desc_start_idx = i + 1
-            elseif desc_start_idx and line:match('^%S') then
-                desc_end_idx = i - 1
-                break
-            end
-        end
-        desc_end_idx = desc_end_idx or #change_template
-
-        -- Rebuild template with new description
-        local new_change = {}
-        for i = 1, #change_template do
-            if i < desc_start_idx - 1 then
-                table.insert(new_change, change_template[i])
-            elseif i == desc_start_idx - 1 then
-                -- This is the "Description:" line
-                table.insert(new_change, change_template[i])
-                for _, line in ipairs(new_desc_lines) do
-                    table.insert(new_change, '\t' .. line)
+    -- On save, submit the change
+    vim.api.nvim_create_autocmd('BufWriteCmd', {
+        buffer = buf,
+        callback = function()
+            -- Get buffer contents and filter out documentation comments
+            local all_lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
+            local spec_lines = {}
+            for _, line in ipairs(all_lines) do
+                -- Skip comment lines and separator
+                if not line:match('^#') and not line:match('^%-%-%-$') then
+                    table.insert(spec_lines, line)
                 end
-            elseif i > desc_end_idx then
-                table.insert(new_change, change_template[i])
             end
-        end
 
-        -- Submit to Perforce
-        local tmpname = vim.fn.tempname()
-        local tmpfile = io.open(tmpname, 'w')
-        for _, line in ipairs(new_change) do
-            tmpfile:write(line .. '\n')
-        end
-        tmpfile:close()
+            -- Write to temp file and submit
+            local tmpname = vim.fn.tempname()
+            vim.fn.writefile(spec_lines, tmpname)
 
-        local result = vim.fn.systemlist('p4 change -i < ' .. vim.fn.shellescape(tmpname))
-        os.remove(tmpname)
+            local result = vim.fn.systemlist('p4 change -i < ' .. vim.fn.shellescape(tmpname))
+            os.remove(tmpname)
 
-        if vim.v.shell_error ~= 0 then
-            vim.notify('Failed to update: ' .. table.concat(result, '\n'), vim.log.levels.ERROR)
-        else
-            vim.notify('Changelist ' .. cn .. ' updated', vim.log.levels.INFO)
-            show_window()
-        end
-    end
+            if vim.v.shell_error ~= 0 then
+                vim.notify('Failed to update: ' .. table.concat(result, '\n'), vim.log.levels.ERROR)
+            else
+                vim.notify('Changelist updated', vim.log.levels.INFO)
+                vim.schedule(function()
+                    pcall(vim.api.nvim_buf_delete, buf, { force = true })
+                    show_window()
+                end)
+            end
+        end,
+    })
 
-    -- Map <ESC> to cancel and <CR> to save and close
-    local opts = { buffer = desc_buf, noremap = true, silent = true }
-    vim.keymap.set('n', '<CR>',  function() save_description(); vim.api.nvim_win_close(desc_win, true); end, opts)
-    vim.keymap.set('n', '<ESC>', function() vim.api.nvim_win_close(desc_win, true); end, opts)
+    -- On close without save, just refresh the P4 window
+    vim.api.nvim_create_autocmd('BufWipeout', {
+        buffer = buf,
+        once = true,
+        callback = function()
+            vim.schedule(show_window)
+        end,
+    })
 end
 
 --- Cursor based action handler
@@ -574,11 +578,9 @@ local function input_action()
         vim.cmd('edit ' .. vim.fn.fnameescape(data.opened_file.local_path))
 
     -- Edit the description of a changelist
-    elseif data.type == 'description_line' then
-       edit_changelist_description(data.change_number)
-
+    elseif data.type == 'description_line' or data.type == 'changelist'
+           or data.type == 'jobs_header' or data.type == 'job_line' then
         edit_changelist_description(data.change_number)
-        error('Unknown action type: ' .. (data.type or 'nil'))
     end
 end
 
