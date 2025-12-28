@@ -241,6 +241,24 @@ local function p4_vdiffsplit(file)
         end
     end
 
+    -- Close both windows helper
+    local function close_both()
+        pcall(vim.api.nvim_win_call, local_win, function() vim.cmd('diffoff') end)
+        pcall(vim.api.nvim_win_call, left_win, function() vim.cmd('diffoff') end)
+        if vim.api.nvim_buf_is_valid(left_buf) then
+            pcall(vim.api.nvim_buf_delete, left_buf, { force = true })
+        end
+        if vim.api.nvim_buf_is_valid(local_buf) then
+            pcall(vim.api.nvim_buf_delete, local_buf, { force = true })
+        end
+        if vim.api.nvim_win_is_valid(left_win) then
+            pcall(vim.api.nvim_win_close, left_win, true)
+        end
+        if vim.api.nvim_win_is_valid(local_win) then
+            pcall(vim.api.nvim_win_close, local_win, true)
+        end
+    end
+
     -- Auto-clean depot buffer when its window closes
     vim.api.nvim_create_autocmd('WinClosed', {
         callback = function(args)
@@ -252,6 +270,8 @@ local function p4_vdiffsplit(file)
         once = true,
     })
 
+    -- Add keymap to close both windows from depot side
+    vim.keymap.set('n', 'q', close_both, { nowait = true, noremap = true, silent = true })
 end
 
 --- Get current Perforce client info (name and root)
