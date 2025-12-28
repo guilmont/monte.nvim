@@ -54,25 +54,25 @@ nvim
 
 | Mode | Key | Action |
 |------|-----|--------|
-| - | `Space` | Lead/reveal file explorer (Neo-tree) |
-| `n` | `Ctrl+\` | Close file explorer |
+| - | `Space` | Leader key |
+| `n` | `\` | Reveal current file in Neo-tree |
+| `n` | `Ctrl+\` | Close Neo-tree |
 | `n` | `Ctrl+p` | Find files (Telescope) |
 | `n` | `Ctrl+b` | Find buffers (Telescope) |
 | `n` | `Ctrl+g` | Grep search / live grep (Telescope) |
 | `n` | `Alt+v` | Start V-block selection (WSL-friendly `Ctrl+v`) |
-| `n` | `Esc` | Clear search highlights
-| `n` | `Alt+v` | Start V-block selection (WSL-friendly) |
+| `n` | `Esc` | Clear search highlights |
 
 ### Cursor & Editing (VS Code-like)
 
 | Mode | Key | Action |
 |------|-----|--------|
 | `n` `i` `v` | `Alt+j` / `Alt+↓` | Move line/block down |
-| `n` `i` `i` | `Alt+→` | Jump word forward |
+| `n` `i` `v` | `Alt+k` / `Alt+↑` | Move line/block up |
+| `n` `v` `i` | `Alt+→` | Jump word forward |
 | `n` `v` `i` | `Alt+←` | Jump word backward |
 | `n` `i` | `Alt+Backspace` | Delete word backward |
-| `n` `i` | `Alt+Backspace` | Delete word backward |
-| `i` | `Alt+Delete` | Delete word forward |
+| `n` `i` | `Alt+Delete` | Delete word forward |
 | `n` | `gg` | Go to top of file |
 | `n` | `G` | Go to bottom of file |
 
@@ -90,7 +90,7 @@ nvim
 | `n` | `<leader>ls` | Signature Help |
 | `n` | `<leader>lR` | Rename |
 | `n` | `<leader>la` | Code Action |
-| `n` | `<leader>lf` | Format Buffer |
+| `n` | `<leader>lF` | Format Buffer |
 | `n` | `<leader>lS` | Workspace Symbols |
 | `n` | `<leader>lx` | Line Diagnostics |
 | `n` | `<leader>lX` | Restart LSP Clients |
@@ -111,10 +111,9 @@ nvim
 |------|-----|--------|
 | `i` | `Ctrl+Space` | Trigger completion menu (manual) |
 | `i` | `Enter` | Confirm selection |
-| `i` | `Ctrl+j` / `Ctrl+k` | Next / previous item |
+| `i` | `j` / `k` | Next / previous item |
 
-**Note:** Completion is manual by design (does not auto-open). Press `Ctrl+Space` to trigger. `Tab` is reserved for Copilot suggestions
-Completion is manual by design (the completion menu does not auto-open).
+**Note:** Completion is manual by design (does not auto-open). Press `Ctrl+Space` to trigger. `Tab` is reserved for Copilot suggestions.
 
 ### GitHub Copilot
 
@@ -145,9 +144,8 @@ Completion is manual by design (the completion menu does not auto-open).
 | `n` | `<leader>pD` | Delete current file |
 | `n` | `<leader>pR` | Move/rename current file |
 | `n` | `<leader>pd` | Diff current file |
-| `n` | `<leader>pn` | Review next opened file |
 
-#### Perforce Changelist Manager (`:P4Opened` or `<leader>ps`)
+#### Perforce Changelist Manager (`:P4Window` or `<leader>ps`)
 
 | Mode | Key | Action |
 |------|-----|--------|
@@ -158,9 +156,7 @@ Completion is manual by design (the completion menu does not auto-open).
 | `n` | `s` | Shelve file or CL |
 | `n` | `u` | Unshelve file or CL |
 | `n` | `D` | Delete file, CL, or shelf |
-| `n` | `N` | Create new changelist |
-| `n` | `A` | Review all opened files |
-| `n` | `q` / `Esc` | Close window |
+
 
 ### Command Runner (`:Run`)
 
@@ -188,7 +184,13 @@ Completion is manual by design (the completion menu does not auto-open).
 - **Error parsing**: Recognizes compiler/linter output (GCC, Clang, Rust, Python, etc.)
 - **Persistent output**: Buffer persists when closing the window with `:q`
 - **Background execution**: Terminal remains usable while command runs
-- **Clickable errors**: Jump directlyat current file |
+- **Clickable errors**: Jump directly to error location with `Enter` or `gf`
+
+### Neo-tree (File Explorer)
+
+| Mode | Key | Action |
+|------|-----|--------|
+| `n` | `\` | Reveal current file in Neo-tree |
 | `n` | `Ctrl+\` | Close Neo-tree |
 | `n` | `Enter` / `l` | Open file/expand directory |
 | `n` | `h` / `Backspace` | Close directory / navigate to parent |
@@ -200,12 +202,12 @@ Completion is manual by design (the completion menu does not auto-open).
 | `n` | `p` | Paste from clipboard |
 | `n` | `H` | Toggle hidden files visibility |
 | `n` | `R` | Refresh tree |
-| `n` | `?` | Show help / keybinding reference
-| `n` | `r` | Rename |
-| `n` | `y` | Copy |
-| `n` | `x` | Cut |
-| `n` | `p` | Paste |
-| `n` | `H` | Toggle hidden files | and loads modules
+| `n` | `?` | Show help / keybinding reference |
+
+## 📂 Project Structure
+
+```
+├── init.lua                  # Entry point: bootstraps lazy.nvim and loads modules
 ├── lazy-lock.json            # Plugin version lockfile (auto-generated)
 ├── lua/
 │   ├── config/
@@ -225,11 +227,11 @@ Completion is manual by design (the completion menu does not auto-open).
 │       ├── neo-tree.lua      # File explorer with file watcher
 │       ├── telescope.lua     # Fuzzy finder (files, buffers, live grep)
 │       ├── treesitter.lua    # Treesitter for better syntax highlighting
-│       └── ui.lua            # Statusline (mini.statusline) & auto-t
-│       ├── fugitive.lua      # Git integration
-│       ├── guess-indent.lua  # Auto-detect indentation
-│       ├── lsp.lua           # Language servers
-│       ├── neo-tree.lua      # File explorer
+│       └── ui.lua            # Statusline (mini.statusline) & auto-trim whitespace
+```
+
+## 🔌 Plugins
+
 Core plugin manager:
 - **[lazy.nvim](https://github.com/folke/lazy.nvim)** - Modern, fast plugin manager with lazy loading
 
@@ -252,7 +254,12 @@ UI and utilities:
 - **[nightfox.nvim](https://github.com/EdenEast/nightfox.nvim)** - Color scheme collection (using Carbonfox)
 - **[mini.nvim](https://github.com/echasnovski/mini.nvim)** - Statusline and trailing whitespace management
 - **[guess-indent.nvim](https://github.com/NMAC427/guess-indent.nvim)** - Auto-detect indentation style
-manual configuration needed!** The LSP setup auto-configures all servers installed through Mason:
+
+## 🛠️ Configuration
+
+### LSP Servers
+
+**No manual configuration needed!** The LSP setup auto-configures all servers installed through Mason:
 
 1. Run `:Mason` to open the Mason UI
 2. Navigate to the server you want (e.g., `gopls`, `rust_analyzer`, `clangd`, `pyright`)
@@ -265,7 +272,10 @@ To customize server-specific settings, edit the `server_overrides` table in [lua
 local server_overrides = {
   lua_ls = { settings = { Lua = { completion = { callSnippet = 'Replace' } } } },
   clangd = { cmd = { 'clangd', '--background-index', '--clang-tidy' } },
-  rust_analyzer = { settings = { ['rust-analyzer'] = { checkOnSave = { command = 'clippy' } }
+  rust_analyzer = { settings = { ['rust-analyzer'] = { checkOnSave = { command = 'clippy' } } } },
+}
+```
+
 ### Change Theme
 
 Edit `lua/plugins/colors.lua` and change `carbonfox` to another nightfox variant:
@@ -278,7 +288,11 @@ Edit `lua/plugins/colors.lua` and change `carbonfox` to another nightfox variant
 1. Run `:Mason`
 2. Navigate to the server you want (e.g., `gopls`, `rust_analyzer`, `clangd`)
 3. Press `i` to install
-4. Run `:LspSetup after installing a server?**
+4. Run `:LspSetupInstalled` or restart Neovim
+
+## 🐛 Troubleshooting
+
+**LSP server not working after installing a server?**
 - Servers must be installed via `:Mason` UI (not by editing config)
 - After installing, run `:LspSetupInstalled` or restart Neovim
 - Verify server is attached: `:LspInfo` (should show "client(s) attached")
@@ -303,7 +317,13 @@ Edit `lua/plugins/colors.lua` and change `carbonfox` to another nightfox variant
 - Verify `p4` is available: `which p4` or `p4 -V`
 - Test connection: `p4 info`
 - Check login status: `p4 login -s` (login if needed: `p4 login`)
-- Ensure `P & Design Decisions
+- Ensure `P4CLIENT`, `P4PORT`, and `P4USER` environment variables are set correctly
+
+**Neo-tree or Telescope icons not showing?**
+- Make sure you have a Nerd Font installed and selected in your terminal
+- Set `vim.g.have_nerd_font = true` in [init.lua](init.lua) (should be default)
+
+## 💭 Philosophy & Design Decisions
 
 **Keybindings:**
 - Leader key is `Space`
@@ -340,32 +360,6 @@ Edit `lua/plugins/colors.lua` and change `carbonfox` to another nightfox variant
 - Plugins lazy-load where appropriate (Telescope, Neo-tree)
 - Treesitter provides fast, incremental syntax parsing
 - File watcher enabled in Neo-tree for live updates
-
-**`:Run` command not found?**
-- Ensure [lua/custom/run.lua](lua/custom/run.lua) is being loaded
-- Check [init.lua](init.lua) contains `require('custom.run')`
-- Restart Neovim
-
-**Copilot not suggesting?**
-- Run `:Copilot status` to check authentication
-- Run `:Copilot setup` to re-authenticate
-
-**Telescope not finding files?**
-- Make sure you're in a project directory
-- Check that `ripgrep` is installed for live grep: `brew install ripgrep` (macOS) or `apt install ripgrep` (Linux)
-
-**Completion not working?**
-- Make sure the LSP server is running (`:LspInfo`)
-- Try manually triggering with `Ctrl+Space`
-
-**Perforce commands failing?**
-- Verify `p4` is in your PATH: `which p4`
-- Check your P4 connection: `p4 info`
-- Ensure you're logged in: `p4 login`
-
-**Neo-tree or Telescope icons not showing?**
-- Make sure you have a Nerd Font installed and selected in your terminal
-- Set `vim.g.have_nerd_font = true` in `init.lua` (should be default)
 
 ## 📝 Notes
 
