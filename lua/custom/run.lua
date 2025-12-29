@@ -431,7 +431,7 @@ local function initialize_keymaps()
             vim.cmd('edit ' .. vim.fn.fnameescape(mark.file))
             vim.api.nvim_win_set_cursor(0, {mark.line, mark.col})
         end
-    end, { buffer = output_buffer, desc = 'Go to file:line:col under cursor' })
+    end, { buffer = output_buffer, nowait = true, desc = 'Go to file:line:col under cursor' })
 
     -- Navigate to next location mark
     vim.keymap.set('n', ']', function()
@@ -445,7 +445,7 @@ local function initialize_keymaps()
         if next_line then
             vim.api.nvim_win_set_cursor(0, {next_line + 1, 0})
         end
-    end, { buffer = output_buffer, desc = 'Go to next location mark' })
+    end, { buffer = output_buffer, nowait = true, desc = 'Go to next location mark' })
 
     -- Navigate to previous location mark
     vim.keymap.set('n', '[', function()
@@ -459,17 +459,17 @@ local function initialize_keymaps()
         if prev_line then
             vim.api.nvim_win_set_cursor(0, {prev_line + 1, 0})
         end
-    end, { buffer = output_buffer, desc = 'Go to previous location mark' })
+    end, { buffer = output_buffer, nowait = true, desc = 'Go to previous location mark' })
 
     -- Keymap to re-run last command
     vim.keymap.set('n', 'r', function()
         rerun_last_command()
-    end, { buffer = output_buffer, desc = 'Re-run last command' })
+    end, { buffer = output_buffer, nowait = true, desc = 'Re-run last command' })
 
     -- Keymap to kill running command
     vim.keymap.set('n', 'k', function()
         kill_running_job()
-    end, { buffer = output_buffer, desc = 'Kill running command' })
+    end, { buffer = output_buffer, nowait = true, desc = 'Kill running command' })
 end
 
 --- Initialize or clear the output buffer
