@@ -142,6 +142,7 @@ local output_window = nil
 local run_command = nil  -- Forward function declaration
 local last_command = nil
 local running_job = nil
+local command_start_time = nil  -- Track when command started
 
 local ansi_namespace = nil
 local current_ansi_state = nil  -- Tracks ANSI state across lines
@@ -152,6 +153,19 @@ local has_carriage_return = false -- Used for overwrite detection
 -- ============================================================================
 -- Utility Functions
 -- ============================================================================
+
+--- Format elapsed time in milliseconds to a readable string
+local function format_elapsed_time(ms)
+    if ms < 1000 then
+        return string.format('%.0fms', ms)
+    elseif ms < 60000 then
+        return string.format('%.2fs', ms / 1000)
+    else
+        local minutes = math.floor(ms / 60000)
+        local seconds = math.floor((ms % 60000) / 1000)
+        return string.format('%dm %ds', minutes, seconds)
+    end
+end
 
 --- Kill the current running job, if any
 local function kill_running_job()
@@ -360,12 +374,16 @@ local function initialize_syntax_highlighting()
           syntax clear
           syntax match RunLocation /^@ .*/
           syntax match RunCommand /^\$ .*/
-          syntax match RunExitCode /^\[Process exited with code \d\+\]$/
+          syntax match RunExitCode /^Process exited with code \d\+$/
+          syntax match ElapsedTime /^Elapsed time: .*/
+          syntax match Separator /^-\{40,}$/
           syntax match RunError /\c\<error\>\|\cfailed\|\c\<fatal\>/
           syntax match RunWarning /\c\<warning\>\|\c\<warn\>/
           highlight default link RunLocation Comment
           highlight default link RunCommand Comment
           highlight default link RunExitCode Comment
+          highlight default link ElapsedTime Comment
+          highlight default link Separator Comment
           highlight default link RunError ErrorMsg
           highlight default link RunWarning WarningMsg
         ]])
@@ -554,7 +572,14 @@ end
 
 --- Function called when command is completed
 local function on_complete(job_id, exit_code)
-    update_output({ '', '', string.format('[Process exited with code %d]', exit_code) })
+    local elapsed_ms = command_start_time and (vim.loop.now() - command_start_time) or 0
+    local elapsed_str = format_elapsed_time(elapsed_ms)
+    update_output({
+        '',
+        '----------------------------------------',
+        string.format('Process exited with code %d', exit_code),
+        string.format('Elapsed time: %s', elapsed_str)
+    })
     running_job = nil
 end
 
@@ -571,8 +596,9 @@ run_command = function(cmd)
     -- Initialize and display output window
     show_window()
 
-    -- Store last command
+    -- Store last command and capture start time
     last_command = cmd
+    command_start_time = vim.loop.now()
     -- Reset navigation marks
     navigation_marks = {}
     -- Initialize content
