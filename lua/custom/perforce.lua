@@ -590,8 +590,15 @@ local function input_action()
     -- Toggle shelf expansion
     if data.type == 'shelf_toggle' then
         local cn = data.change_number
+        local cursor_pos = vim.api.nvim_win_get_cursor(win)
         EXPAND_SHELF = not EXPAND_SHELF
         show_window()
+        -- Restore cursor position after show_window updates the buffer
+        vim.schedule(function()
+            if vim.api.nvim_win_is_valid(win) then
+                pcall(vim.api.nvim_win_set_cursor, win, cursor_pos)
+            end
+        end)
 
     -- Open file in editor
     elseif data.type == 'opened_file' then
@@ -1035,18 +1042,67 @@ end
 show_window = function()
     local info = get_client_info()
     CHANGELISTS = get_client_changelists(info)
+
+    -- Clean up any existing perforce buffer to avoid corrupted state
+    local old_buf = get_perforce_buffer()
+    if old_buf and vim.api.nvim_buf_is_valid(old_buf) then
+        pcall(vim.api.nvim_buf_delete, old_buf, { force = true })
+    end
+
+    -- Create a fresh buffer
     local buffer = initialize_buffer()
 
     -- Build lines and index map
     local lines = setup_display_lines()
 
-    -- Ensure/reuse named buffer and use current window
-    local window = vim.api.nvim_get_current_win()
-    vim.api.nvim_win_set_buf(window, buffer)
+    -- Helper to check if a window can be used (not a special buffer)
+    local function is_usable_window(win)
+        local buf = vim.api.nvim_win_get_buf(win)
+        if not vim.api.nvim_buf_is_valid(buf) then return false end
+        local buftype = vim.api.nvim_buf_get_option(buf, 'buftype')
+        -- Skip special buffer types that can't be replaced
+        if buftype == 'nofile' or buftype == 'nowrite' or buftype == 'quickfix' or buftype == 'help' then
+            return false
+        end
+        return true
+    end
+
+    -- Try to find a suitable window for the buffer
+    local window = nil
+    local current_win = vim.api.nvim_get_current_win()
+
+    -- First, try the current window if it's usable
+    if is_usable_window(current_win) then
+        pcall(function() vim.api.nvim_win_set_buf(current_win, buffer) end)
+        window = current_win
+    else
+        -- If current window isn't usable, try to find another one
+        for _, win in ipairs(vim.api.nvim_list_wins()) do
+            if win ~= current_win and is_usable_window(win) then
+                if pcall(function() vim.api.nvim_win_set_buf(win, buffer) end) then
+                    window = win
+                    break
+                end
+            end
+        end
+
+        -- If no suitable window found, create a split
+        if not window then
+            vim.cmd('split')
+            window = vim.api.nvim_get_current_win()
+            vim.api.nvim_win_set_buf(window, buffer)
+        end
+    end
+
     vim.api.nvim_buf_set_option(buffer, 'modifiable', true)
     vim.api.nvim_buf_set_lines(buffer, 0, -1, false, lines)
     apply_syntax_highlighting(buffer)
     vim.api.nvim_buf_set_option(buffer, 'modifiable', false)
+
+    -- Focus on the perforce window
+    if window and vim.api.nvim_win_is_valid(window) then
+        vim.api.nvim_set_current_win(window)
+    end
 end
 
 -- ============================================================================
