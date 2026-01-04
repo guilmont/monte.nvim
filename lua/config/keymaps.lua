@@ -5,6 +5,9 @@ vim.keymap.set('n', '<Esc>', '<cmd>nohlsearch<CR>')
 -- V-block selection (WSL doesn't like <C-v>)
 vim.keymap.set('n', '<M-v>', '<C-v>', { silent = true, desc = 'Start V-block selection' })
 
+-- Open terminal with Ctrl+`
+vim.keymap.set('n', '<leader>t', ':terminal<CR>i', { silent = true, desc = 'Opens terminal in current window' })
+
 -- ============================================================================
 -- Line/block movement
 -- ============================================================================
