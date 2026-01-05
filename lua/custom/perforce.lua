@@ -1040,6 +1040,18 @@ end
 
 
 show_window = function()
+    -- Capture cursor position from existing perforce window before recreating buffer
+    local saved_cursor_pos = nil
+    local buf = get_perforce_buffer()
+    if buf and vim.api.nvim_buf_is_valid(buf) then
+        for _, win in ipairs(vim.api.nvim_list_wins()) do
+            if vim.api.nvim_win_get_buf(win) == buf then
+                saved_cursor_pos = vim.api.nvim_win_get_cursor(win)
+                break
+            end
+        end
+    end
+
     local info = get_client_info()
     CHANGELISTS = get_client_changelists(info)
 
@@ -1102,6 +1114,14 @@ show_window = function()
     -- Focus on the perforce window
     if window and vim.api.nvim_win_is_valid(window) then
         vim.api.nvim_set_current_win(window)
+        -- Restore cursor position if one was saved
+        if saved_cursor_pos then
+            vim.schedule(function()
+                if vim.api.nvim_win_is_valid(window) then
+                    pcall(vim.api.nvim_win_set_cursor, window, saved_cursor_pos)
+                end
+            end)
+        end
     end
 end
 
