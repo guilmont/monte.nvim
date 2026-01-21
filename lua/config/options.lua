@@ -17,7 +17,22 @@ vim.opt.showmode = false
 -- Sync clipboard between OS and Neovim.
 --  Schedule the setting after `UiEnter` because it can increase startup-time.
 vim.schedule(function()
-  vim.opt.clipboard = 'unnamedplus'
+  -- Local: use system clipboard
+  vim.opt.clipboard = "unnamedplus"
+  -- Remote: use OSC 52
+  if vim.env.SSH_TTY then
+    vim.g.clipboard = {
+      name = "OSC 52",
+      copy = {
+        ["+"] = require("vim.ui.clipboard.osc52").copy("+"),
+        ["*"] = require("vim.ui.clipboard.osc52").copy("*"),
+      },
+      paste = {
+          ["+"] = function() return {} end,
+          ["*"] = function() return {} end,
+      },
+    }
+  end
 end)
 
 -- Enable break indent

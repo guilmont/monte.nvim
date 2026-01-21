@@ -1100,7 +1100,7 @@ show_window = function()
 
         -- If no suitable window found, create a split
         if not window then
-            vim.cmd('split')
+            vim.cmd('vsplit')
             window = vim.api.nvim_get_current_win()
             vim.api.nvim_win_set_buf(window, buffer)
         end
