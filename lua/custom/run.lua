@@ -1,5 +1,7 @@
 -- Async command runner with live output in a split window
 
+local utils = require('custom.utils')
+
 -- ============================================================================
 -- Auto completion
 -- ============================================================================
@@ -136,8 +138,6 @@ end
 
 -- Global state
 local BUFFER_NAME = '[Run Output]'
-local output_buffer = nil
-local output_window = nil
 
 local run_command = nil  -- Forward function declaration
 local last_command = nil
@@ -182,13 +182,6 @@ local function rerun_last_command()
     else
         vim.notify('No previous command to re-run', vim.log.levels.WARN)
     end
-end
-
--- Match buffer name to identify output buffer
-local function is_output_buffer(buffer)
-    local name = vim.api.nvim_buf_get_name(buffer)
-    local stem = vim.fn.fnamemodify(name, ":t")
-    return stem == BUFFER_NAME
 end
 
 --- Map ANSI color codes to highlight groups
@@ -329,7 +322,8 @@ local function search_locations(line, line_num)
                 col = colno and tonumber(colno) or 0
             }
             -- Highlight the file:line[:col] pattern (0-based column indexing)
-            vim.api.nvim_buf_set_extmark(output_buffer, ansi_namespace, line_num, s - 1, {
+            local buffer = utils.find_buffer_by_name(BUFFER_NAME)
+            vim.api.nvim_buf_set_extmark(buffer, ansi_namespace, line_num, s - 1, {
                 end_col = e,
                 hl_group = 'Directory',
             })
@@ -343,33 +337,15 @@ end
 -- Window And Buffer Management
 -- ============================================================================
 
---- Show the output window
-local function show_window()
-    -- Reuse existing output window if found
-    for _, win in ipairs(vim.api.nvim_list_wins()) do
-        local buf = vim.api.nvim_win_get_buf(win)
-        if is_output_buffer(buf) then
-            vim.api.nvim_set_current_win(win)
-            output_window = win
-            return
-        end
-    end
-    -- No opened window found, so we create new vertical split for output
-    vim.cmd('botright vsplit')
-    output_window = vim.api.nvim_get_current_win()
-    vim.api.nvim_win_set_buf(output_window, output_buffer)
-
-end
-
 --- Initialize syntax highlighting for output buffer
-local function initialize_syntax_highlighting()
+local function initialize_syntax_highlighting(buffer)
     -- Reset ANSI state for new command
     current_ansi_state = nil
     -- Create fresh namespace with unique name for each new buffer
     ansi_namespace = vim.api.nvim_create_namespace('ansi_hl')
 
     -- Setup syntax highlighting for this buffer
-    vim.api.nvim_buf_call(output_buffer, function()
+    vim.api.nvim_buf_call(buffer, function()
         vim.cmd([[
           syntax clear
           syntax match RunLocation /^@ .*/
@@ -418,42 +394,33 @@ local function initialize_syntax_highlighting()
 end
 
 -- Initialize keymap for new buffer
-local function initialize_keymaps()
+local function initialize_keymaps(window, buffer)
     -- Keymap to close the output window
     vim.keymap.set('n', 'q', function()
-        if vim.api.nvim_win_is_valid(output_window) then
-            vim.api.nvim_win_close(output_window, true)
-            output_window = nil
-        end
-    end, { buffer = output_buffer, desc = 'Close Run Output Window' })
+        utils.close_window(window)
+    end, { buffer = buffer, desc = 'Close Run Output Window' })
 
     -- Set up keymap for navigating to file:line under cursor
     vim.keymap.set('n', '<CR>', function()
-        local line = vim.api.nvim_win_get_cursor(0)[1] - 1
+        local line = utils.get_cursor_position(window).line - 1
         if navigation_marks[line] then
             local mark = navigation_marks[line]
-            local target_buf = vim.fn.bufnr(mark.file)
-
             -- Check if file is already open in a window
-            if target_buf ~= -1 then
-                for _, win in ipairs(vim.api.nvim_list_wins()) do
-                    if vim.api.nvim_win_get_buf(win) == target_buf then
-                        vim.api.nvim_set_current_win(win)
-                        vim.api.nvim_win_set_cursor(win, {mark.line, mark.col})
-                        return
-                    end
-                end
-            end
-
+            local buffer = utils.find_buffer_by_name(mark.file)
+            if buffer then
+                local win = utils.reuse_or_create_window_for_buffer(buffer)
+                utils.set_cursor_position(win, mark.line, mark.col)
             -- File not open, edit it in current window
-            vim.cmd('edit ' .. vim.fn.fnameescape(mark.file))
-            vim.api.nvim_win_set_cursor(0, {mark.line, mark.col})
+            else
+                vim.cmd('edit ' .. vim.fn.fnameescape(mark.file))
+                utils.set_cursor_position(window, mark.line, mark.col)
+            end
         end
-    end, { buffer = output_buffer, nowait = true, desc = 'Go to file:line:col under cursor' })
+    end, { buffer = buffer, nowait = true, desc = 'Go to file:line:col under cursor' })
 
     -- Navigate to next location mark
     vim.keymap.set('n', ']', function()
-        local cur_line = vim.api.nvim_win_get_cursor(0)[1] - 1
+        local cur_line = utils.get_cursor_position(window).line - 1
         local next_line = nil
         for line_num, _ in pairs(navigation_marks) do
             if line_num > cur_line and (next_line == nil or line_num < next_line) then
@@ -461,13 +428,13 @@ local function initialize_keymaps()
             end
         end
         if next_line then
-            vim.api.nvim_win_set_cursor(0, {next_line + 1, 0})
+            utils.set_cursor_position(window, next_line + 1, 0)
         end
-    end, { buffer = output_buffer, nowait = true, desc = 'Go to next location mark' })
+    end, { buffer = buffer, nowait = true, desc = 'Go to next location mark' })
 
     -- Navigate to previous location mark
     vim.keymap.set('n', '[', function()
-        local cur_line = vim.api.nvim_win_get_cursor(0)[1] - 1
+        local cur_line = utils.get_cursor_position(window).line - 1
         local prev_line = nil
         for line_num, _ in pairs(navigation_marks) do
             if line_num < cur_line and (prev_line == nil or line_num > prev_line) then
@@ -475,49 +442,44 @@ local function initialize_keymaps()
             end
         end
         if prev_line then
-            vim.api.nvim_win_set_cursor(0, {prev_line + 1, 0})
+            utils.set_cursor_position(window, prev_line + 1, 0)
         end
-    end, { buffer = output_buffer, nowait = true, desc = 'Go to previous location mark' })
+    end, { buffer = buffer, nowait = true, desc = 'Go to previous location mark' })
 
     -- Keymap to re-run last command
     vim.keymap.set('n', 'r', function()
         rerun_last_command()
-    end, { buffer = output_buffer, nowait = true, desc = 'Re-run last command' })
+    end, { buffer = buffer, nowait = true, desc = 'Re-run last command' })
 
     -- Keymap to kill running command
     vim.keymap.set('n', 'k', function()
         kill_running_job()
-    end, { buffer = output_buffer, nowait = true, desc = 'Kill running command' })
+    end, { buffer = buffer, nowait = true, desc = 'Kill running command' })
 end
 
 --- Initialize or clear the output buffer
 local function initialize_buffer()
-    --- Safely delete output buffer
-    for _, buf in ipairs(vim.api.nvim_list_bufs()) do
-        if vim.api.nvim_buf_is_loaded(buf) then
-            if is_output_buffer(buf) then
-                vim.api.nvim_buf_delete(buf, { force = true })
-            end
-        end
+    -- Reset buffer content if it already exists to preserve window and extmark state
+    local buffer = utils.find_buffer_by_name(BUFFER_NAME)
+    if buffer then
+        utils.reset_buffer_content(buffer)
+    -- Otherwise create a new buffer
+    else
+        buffer = vim.api.nvim_create_buf(true, true)
+        vim.bo[buffer].buftype = 'nofile'
+        vim.bo[buffer].bufhidden = 'hide'
+        vim.bo[buffer].swapfile = false
+        vim.api.nvim_buf_set_name(buffer, BUFFER_NAME)
+
+        -- Setup syntax highlighting and keymaps for the buffer
+        initialize_syntax_highlighting(buffer)
     end
-    output_buffer = nil
-
-    -- Create a brand new buffer
-    output_buffer = vim.api.nvim_create_buf(true, true)
-    vim.bo[output_buffer].buftype = 'nofile'
-    vim.bo[output_buffer].bufhidden = 'hide'
-    vim.bo[output_buffer].swapfile = false
-    vim.api.nvim_buf_set_name(output_buffer, BUFFER_NAME)
-
-    -- Setup syntax highlighting and keymaps for the buffer
-    initialize_syntax_highlighting()
-    -- Setup keymaps for the buffer
-    initialize_keymaps()
-
     -- Clear any existing content
-    vim.bo[output_buffer].modifiable = true
-    vim.api.nvim_buf_set_lines(output_buffer, 0, -1, false, { '@ ' .. vim.fn.getcwd(), '' })
-    vim.bo[output_buffer].modifiable = false
+    vim.bo[buffer].modifiable = true
+    utils.set_buffer_lines(buffer, 0, -1, { '@ ' .. vim.fn.getcwd(), '' })
+    vim.bo[buffer].modifiable = false
+
+    return buffer
 end
 
 
@@ -526,46 +488,58 @@ local function update_output(data)
     if not data or #data == 0 then return end
 
     vim.schedule(function()
-        if not vim.api.nvim_buf_is_valid(output_buffer) then return end
+        local buffer = utils.find_buffer_by_name(BUFFER_NAME)
+        if not buffer then return end
+
+        -- Find the window displaying this buffer, if any, to manage auto-scrolling
+        local window = utils.find_window_by_buffer(buffer)
+        local at_bottom = true
+        if window then
+            local curr_line = utils.get_cursor_position(window).line
+            local line_count = utils.get_buffer_line_count(buffer)
+            at_bottom = curr_line == 1 or curr_line == line_count
+         end
 
         -- Go thru each chunk of new data
-        vim.bo[output_buffer].modifiable = true
+        vim.bo[buffer].modifiable = true
         for idx, chunk in ipairs(data) do
             local offset = 0
             local line, highlights, has_cr = parse_terminal_sequences(chunk)
 
             if idx == 1 then
                 if not has_carriage_return then
-                    local last_line = vim.api.nvim_buf_get_lines(output_buffer, -2, -1, false)[1] or ''
+                    local last_line = utils.get_buffer_lines(buffer, -2, -1)[1] or ''
                     line = last_line .. line
                     offset = #last_line
                 end
 
-                vim.api.nvim_buf_set_lines(output_buffer, -2, -1, false, { line })
+                utils.set_buffer_lines(buffer, -2, -1, { line })
             else
-                vim.api.nvim_buf_set_lines(output_buffer, -1, -1, false, { line })
+                utils.set_buffer_lines(buffer, -1, -1, { line })
             end
             -- Update carriage return state for next input data
             has_carriage_return = has_cr
 
-            local line_num = vim.api.nvim_buf_line_count(output_buffer) - 1
+            local line_num = utils.get_buffer_line_count(buffer) - 1
             -- Search for file:line patterns and set navigation marks
             search_locations(line, line_num)
 
             -- Apply highlight ranges (offset by existing line length if appending)
             for _, hl in ipairs(highlights) do
-                vim.api.nvim_buf_set_extmark(output_buffer, ansi_namespace, line_num, hl.start + offset, {
+                vim.api.nvim_buf_set_extmark(buffer, ansi_namespace, line_num, hl.start + offset, {
                     end_col = hl.stop + offset,
                     hl_group = hl.hl,
                 })
             end
         end
 
-        vim.bo[output_buffer].modifiable = false
+        vim.bo[buffer].modifiable = false
 
-        -- Auto-scroll to bottom
-        if vim.api.nvim_win_is_valid(output_window) then
-            vim.api.nvim_win_set_cursor(output_window, { vim.api.nvim_buf_line_count(output_buffer), 0 })
+        -- If window is displayed, auto-scroll to bottom if cursor was already at the end
+        -- This allows users to scroll up and read output without being forced to the bottom on every update
+        if window and at_bottom then
+            local line_count = utils.get_buffer_line_count(buffer)
+            utils.set_cursor_position(window, line_count, 0)
         end
     end)
 end
@@ -592,9 +566,12 @@ run_command = function(cmd)
     -- Stop any running job before starting new one
     kill_running_job()
     -- Prepare output buffer for new command
-    initialize_buffer()
-    -- Initialize and display output window
-    show_window()
+    local buffer = initialize_buffer()
+    -- Reuse existing window if buffer is already displayed, otherwise create a new split
+    local window = utils.reuse_or_create_window_for_buffer(buffer)
+
+    -- Setup keymaps for the buffer
+    initialize_keymaps(window, buffer)
 
     -- Store last command and capture start time
     last_command = cmd
