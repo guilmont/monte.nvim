@@ -210,6 +210,21 @@ function M.set_current_window(winid)
     end
 end
 
+-- Set buffer for a given window ID.
+function M.set_window_buffer(winid, bufnr)
+    if M.is_window_valid(winid) and M.is_buffer_valid(bufnr) then
+        vim.api.nvim_win_set_buf(winid, bufnr)
+    end
+end
+
+-- Get buffer for a given window ID. Returns nil if window is invalid.
+function M.get_window_buffer(winid)
+    if M.is_window_valid(winid) then
+        return vim.api.nvim_win_get_buf(winid)
+    end
+    return nil
+end
+
 -- Get cursor position for a given window, or current window if none provided.
 function M.get_cursor_position(winid)
     if M.is_window_valid(winid) then

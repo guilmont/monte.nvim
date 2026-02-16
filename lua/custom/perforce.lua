@@ -1,4 +1,5 @@
 -- Perforce integration for Neovim
+local utils = require('custom.utils')
 
 -- ============================================================================
 -- SIMPLE FILE OPERATIONS
@@ -185,9 +186,8 @@ local function p4_vdiffsplit(file)
     if vim.fn.expand('%:p') ~= file then
         vim.cmd('edit ' .. vim.fn.fnameescape(file))
     end
-
-    local local_win = vim.api.nvim_get_current_win()
-    local local_buf = vim.api.nvim_get_current_buf()
+    local right_win = utils.get_current_window()
+    local right_buf = utils.get_window_buffer(right_win)
 
     -- Create scratch buffer for depot side
     local left_buf = vim.api.nvim_create_buf(false, true)
@@ -199,64 +199,43 @@ local function p4_vdiffsplit(file)
     vim.api.nvim_buf_set_lines(left_buf, 0, -1, false, depot_content)
 
     -- Open vertical split to the LEFT of the file window (keeps sidebars leftmost)
-    vim.api.nvim_set_current_win(local_win)
     vim.cmd('leftabove vsplit')
-    local left_win = vim.api.nvim_get_current_win()
-    vim.api.nvim_win_set_buf(left_win, left_buf)
+    local left_win = utils.get_current_window()
+    utils.set_window_buffer(left_win, left_buf)
 
     -- Enable diff mode on both, with common navigation
     vim.api.nvim_win_call(left_win, function() vim.cmd('diffthis') end)
-    vim.api.nvim_win_call(local_win, function() vim.cmd('diffthis') end)
     vim.wo[left_win].scrollbind = true
-    vim.wo[local_win].scrollbind = true
     vim.wo[left_win].cursorbind = true
-    vim.wo[local_win].cursorbind = true
+    vim.api.nvim_win_call(right_win, function() vim.cmd('diffthis') end)
+    vim.wo[right_win].scrollbind = true
+    vim.wo[right_win].cursorbind = true
 
 
     -- Close helper: leave the real buffer, wipe the depot buffer, stop diff
     local function close_diff()
-        pcall(vim.api.nvim_win_call, local_win, function() vim.cmd('diffoff') end)
         pcall(vim.api.nvim_win_call, left_win, function() vim.cmd('diffoff') end)
+        pcall(utils.close_window, left_win)
+        pcall(utils.remove_buffer, left_buf)
         -- Reset cursor and scroll binding options
-        if vim.api.nvim_win_is_valid(left_win) then
+        pcall(vim.api.nvim_win_call, right_win, function() vim.cmd('diffoff') end)
+        if vim.api.nvim_win_is_valid(right_win) then
             pcall(function()
-                vim.wo[left_win].scrollbind = false
-                vim.wo[left_win].cursorbind = false
+                vim.wo[right_win].scrollbind = false
+                vim.wo[right_win].cursorbind = false
+                utils.set_current_window(right_win)
             end)
-        end
-        if vim.api.nvim_win_is_valid(local_win) then
-            pcall(function()
-                vim.wo[local_win].scrollbind = false
-                vim.wo[local_win].cursorbind = false
-            end)
-        end
-        if vim.api.nvim_buf_is_valid(left_buf) then
-            pcall(vim.api.nvim_buf_delete, left_buf, { force = true })
-        end
-        if vim.api.nvim_win_is_valid(left_win) then
-            pcall(vim.api.nvim_win_close, left_win, true)
-        end
-        if vim.api.nvim_win_is_valid(local_win) then
-            vim.api.nvim_set_current_win(local_win)
         end
     end
 
     -- Close both windows helper
     local function close_both()
-        pcall(vim.api.nvim_win_call, local_win, function() vim.cmd('diffoff') end)
         pcall(vim.api.nvim_win_call, left_win, function() vim.cmd('diffoff') end)
-        if vim.api.nvim_buf_is_valid(left_buf) then
-            pcall(vim.api.nvim_buf_delete, left_buf, { force = true })
-        end
-        if vim.api.nvim_buf_is_valid(local_buf) then
-            pcall(vim.api.nvim_buf_delete, local_buf, { force = true })
-        end
-        if vim.api.nvim_win_is_valid(left_win) then
-            pcall(vim.api.nvim_win_close, left_win, true)
-        end
-        if vim.api.nvim_win_is_valid(local_win) then
-            pcall(vim.api.nvim_win_close, local_win, true)
-        end
+        pcall(utils.close_window, left_win)
+        pcall(utils.remove_buffer, left_buf)
+        pcall(vim.api.nvim_win_call, right_win, function() vim.cmd('diffoff') end)
+        pcall(utils.close_window, right_win)
+        pcall(utils.remove_buffer, right_buf)
     end
 
     -- Auto-clean depot buffer when its window closes
@@ -447,32 +426,25 @@ local INDEX_MAP = {}
 
 local show_window -- forward declaration for actions use
 
---- Return buffer for perforce window if it exists
-local function get_perforce_buffer()
-    for _, buf in ipairs(vim.api.nvim_list_bufs()) do
-        local name = vim.api.nvim_buf_get_name(buf)
-        local stem = vim.fn.fnamemodify(name, ":t")
-        if stem == BUFFER_NAME then
-            return buf
-        end
-    end
-    return nil
-end
-
 --- Return window for perforce window if it exists
 local function get_perforce_window()
     -- Find buffer for perforce window
-    local buf = get_perforce_buffer()
-    if not (buf and vim.api.nvim_buf_is_valid(buf)) then
+    local buf = utils.find_buffer_by_name(BUFFER_NAME)
+    if not buf then
         error('No valid Perforce buffer for action')
     end
     -- Find window displaying that buffer
-    for _, win in ipairs(vim.api.nvim_list_wins()) do
-        if vim.api.nvim_win_get_buf(win) == buf then
-            return win
-        end
+    local win = utils.find_window_by_buffer(buf)
+    if win then
+        return win
     end
     error('No valid Perforce window for action')
+end
+
+-- Return line number in which cursor is on perforce window
+local function get_action_line()
+    local win = get_perforce_window()
+    return utils.get_cursor_position(win).line
 end
 
 --- Edit the description of a changelist
@@ -579,8 +551,7 @@ end
 --- Cursor based action handler
 local function input_action()
     -- Get action data for current line
-    local win = get_perforce_window()
-    local line = vim.api.nvim_win_get_cursor(win)[1]
+    local line = get_action_line()
     local data = INDEX_MAP[line]
     -- Just in case
     if not data then
@@ -589,16 +560,8 @@ local function input_action()
 
     -- Toggle shelf expansion
     if data.type == 'shelf_toggle' then
-        local cn = data.change_number
-        local cursor_pos = vim.api.nvim_win_get_cursor(win)
         EXPAND_SHELF = not EXPAND_SHELF
         show_window()
-        -- Restore cursor position after show_window updates the buffer
-        vim.schedule(function()
-            if vim.api.nvim_win_is_valid(win) then
-                pcall(vim.api.nvim_win_set_cursor, win, cursor_pos)
-            end
-        end)
 
     -- Open file in editor
     elseif data.type == 'opened_file' then
@@ -613,8 +576,7 @@ end
 
 local function shelve_files()
     -- Get action data for current line
-    local win = get_perforce_window()
-    local line = vim.api.nvim_win_get_cursor(win)[1]
+    local line = get_action_line()
     local data = INDEX_MAP[line]
     if not data then
         error('No action data found for line ' .. line)
@@ -644,8 +606,7 @@ end
 
 local function unshelve_files()
     -- Get action data for current line
-    local win = get_perforce_window()
-    local line = vim.api.nvim_win_get_cursor(win)[1]
+    local line = get_action_line()
     local data = INDEX_MAP[line]
     if not data then
         error('No action data found for line ' .. line)
@@ -669,8 +630,7 @@ end
 
 local function revert_files()
     -- Get action data for current line
-    local win = get_perforce_window()
-    local line = vim.api.nvim_win_get_cursor(win)[1]
+    local line = get_action_line()
     local data = INDEX_MAP[line]
     if not data then
         error('No action data found for line ' .. line)
@@ -705,8 +665,7 @@ end
 
 local function move_files()
     -- Get action data for current line
-    local win = get_perforce_window()
-    local line = vim.api.nvim_win_get_cursor(win)[1]
+    local line = get_action_line()
     local data = INDEX_MAP[line]
     if not data then
         error('No action data found for line ' .. line)
@@ -747,8 +706,7 @@ end
 
 local function delete_stuff()
     -- Get action data for current line
-    local win = get_perforce_window()
-    local line = vim.api.nvim_win_get_cursor(win)[1]
+    local line = get_action_line()
     local data = INDEX_MAP[line]
     if not data then
         error('No action data found for line ' .. line)
@@ -816,8 +774,7 @@ end
 
 local function show_diff()
     -- Get action data for current line
-    local win = get_perforce_window()
-    local line = vim.api.nvim_win_get_cursor(win)[1]
+    local line = get_action_line()
     local data = INDEX_MAP[line]
     if not data then
         error('No action data found for line ' .. line)
@@ -834,19 +791,8 @@ end
 
 --- Initialize or clear the output buffer
 local function initialize_buffer()
-    -- If buffer already exists, just return it
-    local buf = get_perforce_buffer()
-    if buf then
-        return buf
-    end
-
     -- Create a brand new buffer
-    buf = vim.api.nvim_create_buf(true, true)
-    vim.bo[buf].buftype = 'nofile'
-    vim.bo[buf].bufhidden = 'hide'
-    vim.bo[buf].swapfile = false
-    vim.api.nvim_buf_set_name(buf, BUFFER_NAME)
-
+    local buf = utils.create_scratch_buffer(BUFFER_NAME, false)
     -- Setup keymaps for the buffer
     local opts = { buffer = buf, nowait = true, noremap = true, silent = true }
     vim.keymap.set('n', '<CR>', input_action, opts)
@@ -1042,86 +988,32 @@ end
 show_window = function()
     -- Capture cursor position from existing perforce window before recreating buffer
     local saved_cursor_pos = nil
-    local buf = get_perforce_buffer()
-    if buf and vim.api.nvim_buf_is_valid(buf) then
-        for _, win in ipairs(vim.api.nvim_list_wins()) do
-            if vim.api.nvim_win_get_buf(win) == buf then
-                saved_cursor_pos = vim.api.nvim_win_get_cursor(win)
-                break
-            end
+    local buffer = utils.find_buffer_by_name(BUFFER_NAME)
+    if buffer then
+        local win = utils.find_window_by_buffer(buffer)
+        if win then
+            saved_cursor_pos = utils.get_cursor_position(win)
         end
+    else
+        -- Create a fresh buffer
+        buffer = initialize_buffer()
     end
 
-    local info = get_client_info()
-    CHANGELISTS = get_client_changelists(info)
-
-    -- Clean up any existing perforce buffer to avoid corrupted state
-    local old_buf = get_perforce_buffer()
-    if old_buf and vim.api.nvim_buf_is_valid(old_buf) then
-        pcall(vim.api.nvim_buf_delete, old_buf, { force = true })
-    end
-
-    -- Create a fresh buffer
-    local buffer = initialize_buffer()
 
     -- Build lines and index map
+    local info = get_client_info()
+    CHANGELISTS = get_client_changelists(info)
     local lines = setup_display_lines()
 
-    -- Helper to check if a window can be used (not a special buffer)
-    local function is_usable_window(win)
-        local buf = vim.api.nvim_win_get_buf(win)
-        if not vim.api.nvim_buf_is_valid(buf) then return false end
-        local buftype = vim.api.nvim_buf_get_option(buf, 'buftype')
-        -- Skip special buffer types that can't be replaced
-        if buftype == 'nofile' or buftype == 'nowrite' or buftype == 'quickfix' or buftype == 'help' then
-            return false
-        end
-        return true
-    end
-
-    -- Try to find a suitable window for the buffer
-    local window = nil
-    local current_win = vim.api.nvim_get_current_win()
-
-    -- First, try the current window if it's usable
-    if is_usable_window(current_win) then
-        pcall(function() vim.api.nvim_win_set_buf(current_win, buffer) end)
-        window = current_win
-    else
-        -- If current window isn't usable, try to find another one
-        for _, win in ipairs(vim.api.nvim_list_wins()) do
-            if win ~= current_win and is_usable_window(win) then
-                if pcall(function() vim.api.nvim_win_set_buf(win, buffer) end) then
-                    window = win
-                    break
-                end
-            end
-        end
-
-        -- If no suitable window found, create a split
-        if not window then
-            vim.cmd('vsplit')
-            window = vim.api.nvim_get_current_win()
-            vim.api.nvim_win_set_buf(window, buffer)
-        end
-    end
-
-    vim.api.nvim_buf_set_option(buffer, 'modifiable', true)
-    vim.api.nvim_buf_set_lines(buffer, 0, -1, false, lines)
+    local win = utils.reuse_or_create_window_for_buffer(buffer)
+    utils.set_buffer_lines(buffer, 0, -1, lines)
     apply_syntax_highlighting(buffer)
-    vim.api.nvim_buf_set_option(buffer, 'modifiable', false)
 
     -- Focus on the perforce window
-    if window and vim.api.nvim_win_is_valid(window) then
-        vim.api.nvim_set_current_win(window)
-        -- Restore cursor position if one was saved
-        if saved_cursor_pos then
-            vim.schedule(function()
-                if vim.api.nvim_win_is_valid(window) then
-                    pcall(vim.api.nvim_win_set_cursor, window, saved_cursor_pos)
-                end
-            end)
-        end
+    utils.set_current_window(win)
+    -- Restore cursor position if we had one saved
+    if saved_cursor_pos then
+        pcall(utils.set_cursor_position, win, saved_cursor_pos.line, saved_cursor_pos.col)
     end
 end
 
