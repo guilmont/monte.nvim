@@ -32,6 +32,14 @@ function M.find_buffer_by_filename(filename)
     return nil
 end
 
+-- Create a new scratch buffer with a given name and return its ID.
+function M.create_scratch_buffer(name, modifiable)
+    local bufnr = vim.api.nvim_create_buf(true, true)
+    vim.api.nvim_buf_set_name(bufnr, name)
+    vim.bo[bufnr].modifiable = modifiable
+    return bufnr
+end
+
 -- Check if a buffer is valid and loaded.
 function M.is_buffer_valid(bufnr)
     return vim.api.nvim_buf_is_valid(bufnr) and vim.api.nvim_buf_is_loaded(bufnr)
@@ -62,20 +70,6 @@ function M.remove_buffer_by_name(name)
     end
 end
 
--- Reset buffer content by its ID.
-function M.reset_buffer_content(bufnr)
-    if M.is_buffer_valid(bufnr) then
-        local is_modifiable = vim.bo[bufnr].modifiable
-        if not is_modifiable then
-            vim.bo[bufnr].modifiable = true
-        end
-        vim.api.nvim_buf_set_lines(bufnr, 0, -1, true, {})
-        if not is_modifiable then
-            vim.bo[bufnr].modifiable = false
-        end
-    end
-end
-
 -- Get buffer line count for a given buffer ID.
 function M.get_buffer_line_count(bufnr)
     if M.is_buffer_valid(bufnr) then
@@ -99,8 +93,20 @@ end
 -- Errors if indices are out of range. Lines should be a list of strings.
 function M.set_buffer_lines(bufnr, start, end_, lines)
     if M.is_buffer_valid(bufnr) then
+        local is_modifiable = vim.bo[bufnr].modifiable
+        if not is_modifiable then
+            vim.bo[bufnr].modifiable = true
+        end
         vim.api.nvim_buf_set_lines(bufnr, start, end_, true, lines)
+        if not is_modifiable then
+            vim.bo[bufnr].modifiable = false
+        end
     end
+end
+
+-- Reset buffer content by its ID.
+function M.reset_buffer_content(bufnr)
+    M.set_buffer_lines(bufnr, 0, -1, {})
 end
 
 -- ========================================================================
@@ -168,12 +174,10 @@ end
 function M.reuse_or_create_window_for_buffer(bufnr)
     local winid = M.find_window_by_buffer(bufnr)
     if winid and M.is_window_valid(winid) then
-        print("Reusing existing window for buffer " .. bufnr)
         vim.api.nvim_win_set_buf(winid, bufnr)
         M.set_current_window(winid)
         return winid
     else
-        print("Creating new window for buffer " .. bufnr)
         return M.create_window_for_buffer(bufnr)
     end
 end

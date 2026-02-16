@@ -463,21 +463,14 @@ local function initialize_buffer()
     local buffer = utils.find_buffer_by_name(BUFFER_NAME)
     if buffer then
         utils.reset_buffer_content(buffer)
-    -- Otherwise create a new buffer
     else
-        buffer = vim.api.nvim_create_buf(true, true)
-        vim.bo[buffer].buftype = 'nofile'
-        vim.bo[buffer].bufhidden = 'hide'
-        vim.bo[buffer].swapfile = false
-        vim.api.nvim_buf_set_name(buffer, BUFFER_NAME)
-
+        -- Otherwise create a new buffer
+        buffer = utils.create_scratch_buffer(BUFFER_NAME, false) -- modifiable = false
         -- Setup syntax highlighting and keymaps for the buffer
         initialize_syntax_highlighting(buffer)
     end
-    -- Clear any existing content
-    vim.bo[buffer].modifiable = true
+    -- Set first line with current working directory for context
     utils.set_buffer_lines(buffer, 0, -1, { '@ ' .. vim.fn.getcwd(), '' })
-    vim.bo[buffer].modifiable = false
 
     return buffer
 end
@@ -501,7 +494,6 @@ local function update_output(data)
          end
 
         -- Go thru each chunk of new data
-        vim.bo[buffer].modifiable = true
         for idx, chunk in ipairs(data) do
             local offset = 0
             local line, highlights, has_cr = parse_terminal_sequences(chunk)
@@ -532,8 +524,6 @@ local function update_output(data)
                 })
             end
         end
-
-        vim.bo[buffer].modifiable = false
 
         -- If window is displayed, auto-scroll to bottom if cursor was already at the end
         -- This allows users to scroll up and read output without being forced to the bottom on every update
