@@ -197,6 +197,7 @@ local function p4_vdiffsplit(file)
     vim.bo[left_buf].bufhidden = 'wipe'
     vim.api.nvim_buf_set_name(left_buf, (depot_file or 'P4 Depot') .. (have_rev and ('#' .. have_rev) or ''))
     vim.api.nvim_buf_set_lines(left_buf, 0, -1, false, depot_content)
+    vim.bo[left_buf].modifiable = false
 
     -- Open vertical split to the LEFT of the file window (keeps sidebars leftmost)
     vim.cmd('leftabove vsplit')
@@ -238,6 +239,31 @@ local function p4_vdiffsplit(file)
         pcall(utils.remove_buffer, right_buf)
     end
 
+    -- Revert current hunk in the real file using depot side as source
+    local function revert_hunk()
+        if vim.api.nvim_win_is_valid(right_win) then
+            vim.api.nvim_win_call(right_win, function()
+                vim.cmd('diffget')
+            end)
+        end
+    end
+
+    local function jump_prev_hunk()
+        if vim.api.nvim_win_is_valid(right_win) then
+            vim.api.nvim_win_call(right_win, function()
+                vim.cmd('normal! [c')
+            end)
+        end
+    end
+
+    local function jump_next_hunk()
+        if vim.api.nvim_win_is_valid(right_win) then
+            vim.api.nvim_win_call(right_win, function()
+                vim.cmd('normal! ]c')
+            end)
+        end
+    end
+
     -- Auto-clean depot buffer when its window closes
     vim.api.nvim_create_autocmd('WinClosed', {
         callback = function(args)
@@ -249,8 +275,18 @@ local function p4_vdiffsplit(file)
         once = true,
     })
 
-    -- Add keymap to close both windows from depot side
-    vim.keymap.set('n', 'q', close_both, { nowait = true, noremap = true, silent = true })
+    -- Local keymaps for the diff session
+    local map_opts = { nowait = true, noremap = true, silent = true }
+    vim.keymap.set('n', 'q', close_both, vim.tbl_extend('force', map_opts, { buffer = left_buf }))
+    vim.keymap.set('n', 'q', close_both, vim.tbl_extend('force', map_opts, { buffer = right_buf }))
+    vim.keymap.set('n', 'r', revert_hunk, vim.tbl_extend('force', map_opts, { buffer = left_buf }))
+    vim.keymap.set('n', 'r', revert_hunk, vim.tbl_extend('force', map_opts, { buffer = right_buf }))
+    vim.keymap.set('n', '[', jump_prev_hunk, vim.tbl_extend('force', map_opts, { buffer = left_buf }))
+    vim.keymap.set('n', '[', jump_prev_hunk, vim.tbl_extend('force', map_opts, { buffer = right_buf }))
+    vim.keymap.set('n', ']', jump_next_hunk, vim.tbl_extend('force', map_opts, { buffer = left_buf }))
+    vim.keymap.set('n', ']', jump_next_hunk, vim.tbl_extend('force', map_opts, { buffer = right_buf }))
+
+    vim.notify('P4 Diff: [ / ] jump hunks, r reverts hunk, q closes', vim.log.levels.INFO)
 end
 
 --- Get current Perforce client info (name and root)

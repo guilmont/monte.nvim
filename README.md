@@ -145,6 +145,15 @@ nvim
 | `n` | `<leader>pR` | Move/rename current file |
 | `n` | `<leader>pd` | Diff current file |
 
+#### Perforce Diff View (`:P4Diff` or `<leader>pd`)
+
+| Mode | Key | Action |
+|------|-----|--------|
+| `n` | `[` | Jump to previous diff hunk |
+| `n` | `]` | Jump to next diff hunk |
+| `n` | `r` | Revert current hunk (from depot to local) |
+| `n` | `q` | Close diff view |
+
 #### Perforce Changelist Manager (`:P4Window` or `<leader>ps`)
 
 | Mode | Key | Action |
