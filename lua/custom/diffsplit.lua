@@ -12,12 +12,18 @@ function M.open_file_diffsplit(args)
     local left_content = args.left_content or {}
     local left_name = args.left_name or 'Diff Base'
 
+    -- Capture whatever buffer was in the window before we possibly replace it via 'edit'
+    -- so close_both can restore it (e.g. return to the git window) instead of closing nvim.
+    local prev_buf = vim.api.nvim_win_get_buf(vim.api.nvim_get_current_win())
+
     if vim.fn.expand('%:p') ~= filepath then
         vim.cmd('edit ' .. vim.fn.fnameescape(filepath))
     end
 
     local right_win = utils.get_current_window()
     local right_buf = utils.get_window_buffer(right_win)
+    -- If the window already showed the target file, prev_buf is irrelevant
+    if prev_buf == right_buf then prev_buf = nil end
 
     local left_buf = vim.api.nvim_create_buf(false, true)
     local ft = vim.filetype.match({ filename = filepath }) or ''
@@ -62,7 +68,21 @@ function M.open_file_diffsplit(args)
         pcall(utils.remove_buffer, left_buf)
 
         pcall(vim.api.nvim_win_call, right_win, function() vim.cmd('diffoff') end)
-        pcall(utils.close_window, right_win)
+        if vim.api.nvim_win_is_valid(right_win) then
+            pcall(function()
+                vim.wo[right_win].scrollbind = false
+                vim.wo[right_win].cursorbind = false
+            end)
+            if prev_buf and vim.api.nvim_buf_is_valid(prev_buf) then
+                -- Restore the buffer that was here before the diff opened (e.g. the git window).
+                -- This avoids closing nvim when right_win is the last real window.
+                vim.api.nvim_win_set_buf(right_win, prev_buf)
+                utils.set_current_window(right_win)
+            else
+                utils.dismiss_buffer_window(right_win, right_buf)
+                return
+            end
+        end
         pcall(utils.remove_buffer, right_buf)
     end
 

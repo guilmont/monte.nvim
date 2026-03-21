@@ -150,6 +150,14 @@ local navigation_marks = {}  -- Maps line numbers to file locations
 
 local has_carriage_return = false -- Used for overwrite detection
 
+--- Ensure extmark namespace exists even after module reloads
+local function ensure_ansi_namespace()
+    if type(ansi_namespace) ~= 'number' then
+        ansi_namespace = vim.api.nvim_create_namespace('ansi_hl')
+    end
+    return ansi_namespace
+end
+
 -- ============================================================================
 -- Utility Functions
 -- ============================================================================
@@ -301,6 +309,7 @@ end
 
 --- Search for file:line or file:line:col patterns and set navigation marks
 local function search_locations(line, line_num)
+    local ns_id = ensure_ansi_namespace()
     local pos = 1
     while pos <= #line do
         -- Try matching file:line:col first
@@ -323,7 +332,7 @@ local function search_locations(line, line_num)
             }
             -- Highlight the file:line[:col] pattern (0-based column indexing)
             local buffer = utils.find_buffer_by_name(BUFFER_NAME)
-            vim.api.nvim_buf_set_extmark(buffer, ansi_namespace, line_num, s - 1, {
+            vim.api.nvim_buf_set_extmark(buffer, ns_id, line_num, s - 1, {
                 end_col = e,
                 hl_group = 'Directory',
             })
@@ -341,8 +350,8 @@ end
 local function initialize_syntax_highlighting(buffer)
     -- Reset ANSI state for new command
     current_ansi_state = nil
-    -- Create fresh namespace with unique name for each new buffer
-    ansi_namespace = vim.api.nvim_create_namespace('ansi_hl')
+    -- Ensure namespace exists (important when state was reset by a reload)
+    ansi_namespace = ensure_ansi_namespace()
 
     -- Setup syntax highlighting for this buffer
     vim.api.nvim_buf_call(buffer, function()
@@ -405,12 +414,23 @@ local function initialize_keymaps(window, buffer)
         local line = utils.get_cursor_position(window).line - 1
         if navigation_marks[line] then
             local mark = navigation_marks[line]
+            local target_win = utils.find_window_by_buffer(utils.find_buffer_by_name(mark.file))
+                or utils.find_alternate_real_window(window)
+
             -- Check if file is already open in a window
             local buffer = utils.find_buffer_by_name(mark.file)
-            if buffer then
+            if buffer and target_win then
+                utils.set_window_buffer(target_win, buffer)
+                utils.set_current_window(target_win)
+                utils.set_cursor_position(target_win, mark.line, mark.col)
+            elseif buffer then
                 local win = utils.reuse_or_create_window_for_buffer(buffer)
                 utils.set_cursor_position(win, mark.line, mark.col)
-            -- File not open, edit it in current window
+            elseif target_win then
+                utils.set_current_window(target_win)
+                vim.cmd('edit ' .. vim.fn.fnameescape(mark.file))
+                utils.set_cursor_position(target_win, mark.line, mark.col)
+            -- File not open and no reusable window exists
             else
                 vim.cmd('edit ' .. vim.fn.fnameescape(mark.file))
                 utils.set_cursor_position(window, mark.line, mark.col)
@@ -481,6 +501,7 @@ local function update_output(data)
     if not data or #data == 0 then return end
 
     vim.schedule(function()
+        local ns_id = ensure_ansi_namespace()
         local buffer = utils.find_buffer_by_name(BUFFER_NAME)
         if not buffer then return end
 
@@ -518,7 +539,7 @@ local function update_output(data)
 
             -- Apply highlight ranges (offset by existing line length if appending)
             for _, hl in ipairs(highlights) do
-                vim.api.nvim_buf_set_extmark(buffer, ansi_namespace, line_num, hl.start + offset, {
+                vim.api.nvim_buf_set_extmark(buffer, ns_id, line_num, hl.start + offset, {
                     end_col = hl.stop + offset,
                     hl_group = hl.hl,
                 })

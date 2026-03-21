@@ -223,6 +223,19 @@ function M.find_window_by_buffer(bufnr)
     return nil
 end
 
+-- Find another real window to reuse, excluding the provided window ID.
+function M.find_alternate_real_window(excluded_winid)
+    for _, winid in ipairs(vim.api.nvim_list_wins()) do
+        if M.is_window_valid(winid)
+            and winid ~= excluded_winid
+            and not is_floating_window(winid)
+            and not is_neotree_window(winid) then
+            return winid
+        end
+    end
+    return nil
+end
+
 -- Check if a window is valid.
 function M.is_window_valid(winid)
     return vim.api.nvim_win_is_valid(winid)
