@@ -307,6 +307,7 @@ local function open_lazygit()
         return
     end
 
+    local term_win = utils.get_current_window()
     local previous_buf = vim.api.nvim_get_current_buf()
     local previous_name = vim.api.nvim_buf_get_name(previous_buf)
 
@@ -319,9 +320,8 @@ local function open_lazygit()
         cwd = root,
         on_exit = function()
             vim.schedule(function()
-                if vim.api.nvim_buf_is_valid(term_buf) then
-                    pcall(vim.api.nvim_buf_delete, term_buf, { force = true })
-                end
+                local win = utils.find_window_by_buffer(term_buf) or term_win
+                utils.dismiss_buffer_window(win, term_buf)
             end)
         end,
     })
@@ -350,7 +350,6 @@ local function initialize_buffer()
     vim.keymap.set('n', 'q', function()
         close_git_window(buf)
     end, opts)
-    table.insert(lines, '[Enter=open | d=diff | r=revert | s=stage/unstage | c=commit | g=lazygit | q=close]')
 
     return buf
 end
@@ -377,7 +376,7 @@ local function setup_display_lines(root)
     end
 
     table.insert(lines, '')
-    table.insert(lines, '[Enter=open | d=diff | r=revert | s=stage/unstage | c=commit | q=close]')
+    table.insert(lines, '[Enter=open | d=diff | r=revert | s=stage/unstage | c=commit | g=lazygit | q=close]')
     table.insert(INDEX_MAP, { type = 'separator' })
     table.insert(INDEX_MAP, { type = 'help' })
 
