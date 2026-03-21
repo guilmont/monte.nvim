@@ -300,6 +300,38 @@ local function commit_changes()
     end)
 end
 
+local function open_lazygit()
+    local root = current_git_root()
+    if vim.fn.executable('lazygit') == 0 then
+        vim.notify('Git: lazygit is not installed', vim.log.levels.WARN)
+        return
+    end
+
+    local previous_buf = vim.api.nvim_get_current_buf()
+    local previous_name = vim.api.nvim_buf_get_name(previous_buf)
+
+    vim.cmd('enew')
+    local term_buf = vim.api.nvim_get_current_buf()
+    vim.bo[term_buf].bufhidden = 'wipe'
+    vim.api.nvim_buf_set_name(term_buf, 'lazygit://' .. root)
+
+    vim.fn.termopen('lazygit', {
+        cwd = root,
+        on_exit = function()
+            vim.schedule(function()
+                if vim.api.nvim_buf_is_valid(term_buf) then
+                    pcall(vim.api.nvim_buf_delete, term_buf, { force = true })
+                end
+            end)
+        end,
+    })
+    vim.cmd('startinsert')
+
+    if previous_name:find(BUFFER_NAME, 1, true) then
+        pcall(vim.api.nvim_buf_delete, previous_buf, { force = true })
+    end
+end
+
 local function close_git_window(buf)
     local win = utils.find_window_by_buffer(buf)
     if win then
@@ -326,9 +358,11 @@ local function initialize_buffer()
     vim.keymap.set('n', 'r', revert_file, opts)
     vim.keymap.set('n', 's', toggle_stage_file, opts)
     vim.keymap.set('n', 'c', commit_changes, opts)
+    vim.keymap.set('n', 'g', open_lazygit, opts)
     vim.keymap.set('n', 'q', function()
         close_git_window(buf)
     end, opts)
+    table.insert(lines, '[Enter=open | d=diff | r=revert | s=stage/unstage | c=commit | g=lazygit | q=close]')
 
     return buf
 end
@@ -417,6 +451,7 @@ show_window = function()
 end
 
 vim.api.nvim_create_user_command('GitWindow', show_window, { desc = 'Git: Show changed files' })
+vim.api.nvim_create_user_command('GitLazyGit', open_lazygit, { desc = 'Git: Open lazygit' })
 vim.api.nvim_create_user_command('GitDiff', function()
     local file = vim.fn.expand('%:p')
     if file == '' then
@@ -427,6 +462,7 @@ vim.api.nvim_create_user_command('GitDiff', function()
 end, { desc = 'Git: Diff current file against HEAD' })
 
 vim.keymap.set('n', '<leader>gs', show_window, { desc = 'Git: Show changed files' })
+vim.keymap.set('n', '<leader>gg', open_lazygit, { desc = 'Git: Open lazygit' })
 vim.keymap.set('n', '<leader>gd', function()
     local file = vim.fn.expand('%:p')
     if file == '' then
