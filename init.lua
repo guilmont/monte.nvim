@@ -13,6 +13,7 @@ require('config.autocmds')
 
 -- Load custom feature modules
 require('custom.perforce')
+require('custom.git')
 require('custom.run')
 
 -- Bootstrap lazy.nvim if not installed

@@ -1,5 +1,6 @@
 -- Perforce integration for Neovim
 local utils = require('custom.utils')
+local diffsplit = require('custom.diffsplit')
 
 -- ============================================================================
 -- SIMPLE FILE OPERATIONS
@@ -182,111 +183,12 @@ local function p4_vdiffsplit(file)
         depot_content = p4_cmd({cmd = 'print -q ', filepath = depot_file, revision = have_rev})
     end
 
-    -- Ensure the local file is the current buffer (like Gvdiffsplit)
-    if vim.fn.expand('%:p') ~= file then
-        vim.cmd('edit ' .. vim.fn.fnameescape(file))
-    end
-    local right_win = utils.get_current_window()
-    local right_buf = utils.get_window_buffer(right_win)
-
-    -- Create scratch buffer for depot side
-    local left_buf = vim.api.nvim_create_buf(false, true)
-    local ft = vim.filetype.match({ filename = file }) or ''
-    vim.bo[left_buf].filetype = ft
-    vim.bo[left_buf].buftype = 'nofile'
-    vim.bo[left_buf].bufhidden = 'wipe'
-    vim.api.nvim_buf_set_name(left_buf, (depot_file or 'P4 Depot') .. (have_rev and ('#' .. have_rev) or ''))
-    vim.api.nvim_buf_set_lines(left_buf, 0, -1, false, depot_content)
-    vim.bo[left_buf].modifiable = false
-
-    -- Open vertical split to the LEFT of the file window (keeps sidebars leftmost)
-    vim.cmd('leftabove vsplit')
-    local left_win = utils.get_current_window()
-    utils.set_window_buffer(left_win, left_buf)
-
-    -- Enable diff mode on both, with common navigation
-    vim.api.nvim_win_call(left_win, function() vim.cmd('diffthis') end)
-    vim.wo[left_win].scrollbind = true
-    vim.wo[left_win].cursorbind = true
-    vim.api.nvim_win_call(right_win, function() vim.cmd('diffthis') end)
-    vim.wo[right_win].scrollbind = true
-    vim.wo[right_win].cursorbind = true
-
-
-    -- Close helper: leave the real buffer, wipe the depot buffer, stop diff
-    local function close_diff()
-        pcall(vim.api.nvim_win_call, left_win, function() vim.cmd('diffoff') end)
-        pcall(utils.close_window, left_win)
-        pcall(utils.remove_buffer, left_buf)
-        -- Reset cursor and scroll binding options
-        pcall(vim.api.nvim_win_call, right_win, function() vim.cmd('diffoff') end)
-        if vim.api.nvim_win_is_valid(right_win) then
-            pcall(function()
-                vim.wo[right_win].scrollbind = false
-                vim.wo[right_win].cursorbind = false
-                utils.set_current_window(right_win)
-            end)
-        end
-    end
-
-    -- Close both windows helper
-    local function close_both()
-        pcall(vim.api.nvim_win_call, left_win, function() vim.cmd('diffoff') end)
-        pcall(utils.close_window, left_win)
-        pcall(utils.remove_buffer, left_buf)
-        pcall(vim.api.nvim_win_call, right_win, function() vim.cmd('diffoff') end)
-        pcall(utils.close_window, right_win)
-        pcall(utils.remove_buffer, right_buf)
-    end
-
-    -- Revert current hunk in the real file using depot side as source
-    local function revert_hunk()
-        if vim.api.nvim_win_is_valid(right_win) then
-            vim.api.nvim_win_call(right_win, function()
-                vim.cmd('diffget')
-            end)
-        end
-    end
-
-    local function jump_prev_hunk()
-        if vim.api.nvim_win_is_valid(right_win) then
-            vim.api.nvim_win_call(right_win, function()
-                vim.cmd('normal! [c')
-            end)
-        end
-    end
-
-    local function jump_next_hunk()
-        if vim.api.nvim_win_is_valid(right_win) then
-            vim.api.nvim_win_call(right_win, function()
-                vim.cmd('normal! ]c')
-            end)
-        end
-    end
-
-    -- Auto-clean depot buffer when its window closes
-    vim.api.nvim_create_autocmd('WinClosed', {
-        callback = function(args)
-            local closed = tonumber(args.match)
-            if closed == left_win then
-                vim.schedule(close_diff)
-            end
-        end,
-        once = true,
+    diffsplit.open_file_diffsplit({
+        filepath = file,
+        left_content = depot_content,
+        left_name = (depot_file or 'P4 Depot') .. (have_rev and ('#' .. have_rev) or ''),
+        notify_message = 'P4 Diff: [ / ] jump hunks, r reverts hunk, q closes base, Q closes both',
     })
-
-    -- Local keymaps for the diff session
-    local map_opts = { nowait = true, noremap = true, silent = true }
-    vim.keymap.set('n', 'q', close_both, vim.tbl_extend('force', map_opts, { buffer = left_buf }))
-    vim.keymap.set('n', 'q', close_both, vim.tbl_extend('force', map_opts, { buffer = right_buf }))
-    vim.keymap.set('n', 'r', revert_hunk, vim.tbl_extend('force', map_opts, { buffer = left_buf }))
-    vim.keymap.set('n', 'r', revert_hunk, vim.tbl_extend('force', map_opts, { buffer = right_buf }))
-    vim.keymap.set('n', '[', jump_prev_hunk, vim.tbl_extend('force', map_opts, { buffer = left_buf }))
-    vim.keymap.set('n', '[', jump_prev_hunk, vim.tbl_extend('force', map_opts, { buffer = right_buf }))
-    vim.keymap.set('n', ']', jump_next_hunk, vim.tbl_extend('force', map_opts, { buffer = left_buf }))
-    vim.keymap.set('n', ']', jump_next_hunk, vim.tbl_extend('force', map_opts, { buffer = right_buf }))
-
-    vim.notify('P4 Diff: [ / ] jump hunks, r reverts hunk, q closes', vim.log.levels.INFO)
 end
 
 --- Get current Perforce client info (name and root)
