@@ -95,6 +95,25 @@ local function get_replacement_buffer(winid, excluded_bufnr)
     return nil
 end
 
+local function is_floating_window(winid)
+    return vim.api.nvim_win_get_config(winid).relative ~= ''
+end
+
+local function is_neotree_window(winid)
+    local bufnr = vim.api.nvim_win_get_buf(winid)
+    return vim.bo[bufnr].filetype == 'neo-tree'
+end
+
+local function count_real_windows()
+    local count = 0
+    for _, winid in ipairs(vim.api.nvim_list_wins()) do
+        if M.is_window_valid(winid) and not is_floating_window(winid) and not is_neotree_window(winid) then
+            count = count + 1
+        end
+    end
+    return count
+end
+
 -- Check if a buffer is displayed in any window.
 function M.is_buffer_displayed(bufnr)
     local windows = vim.api.nvim_list_wins()
@@ -231,6 +250,14 @@ end
 -- Replace a tool window with the previous real buffer, or an empty buffer if none exists.
 function M.dismiss_buffer_window(winid, bufnr)
     if not M.is_window_valid(winid) then
+        if bufnr and vim.api.nvim_buf_is_valid(bufnr) and not M.is_buffer_displayed(bufnr) then
+            pcall(vim.api.nvim_buf_delete, bufnr, { force = true })
+        end
+        return
+    end
+
+    if count_real_windows() > 1 then
+        M.close_window(winid)
         if bufnr and vim.api.nvim_buf_is_valid(bufnr) and not M.is_buffer_displayed(bufnr) then
             pcall(vim.api.nvim_buf_delete, bufnr, { force = true })
         end
