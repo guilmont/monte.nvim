@@ -13,6 +13,7 @@ return {
     { '<C-\\>', ':Neotree close<CR>', desc = 'NeoTree close', silent = true },
   },
   opts = {
+    close_if_last_window = true,
     filesystem = {
       use_libuv_file_watcher = true,
     },
