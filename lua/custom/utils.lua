@@ -19,19 +19,6 @@ function M.find_buffer_by_name(name)
     return nil
 end
 
--- Find buffer by filename and return its ID.
-function M.find_buffer_by_filename(filename)
-    local buffers = vim.api.nvim_list_bufs()
-    for _, bufnr in ipairs(buffers) do
-        local buf_name = vim.api.nvim_buf_get_name(bufnr)
-        local stem = vim.fn.fnamemodify(buf_name, ":t")
-        if stem:match(filename) then
-            return bufnr
-        end
-    end
-    return nil
-end
-
 -- Create a new scratch buffer with a given name and return its ID.
 function M.create_scratch_buffer(name, modifiable)
     local bufnr = vim.api.nvim_create_buf(true, true)
@@ -43,6 +30,69 @@ end
 -- Check if a buffer is valid and loaded.
 function M.is_buffer_valid(bufnr)
     return vim.api.nvim_buf_is_valid(bufnr) and vim.api.nvim_buf_is_loaded(bufnr)
+end
+
+local function is_empty_normal_buffer(bufnr)
+    return vim.bo[bufnr].buflisted
+        and vim.bo[bufnr].buftype == ""
+        and vim.api.nvim_buf_get_name(bufnr) == ""
+        and not vim.bo[bufnr].modified
+        and vim.api.nvim_buf_line_count(bufnr) == 1
+        and vim.api.nvim_buf_get_lines(bufnr, 0, 1, false)[1] == ""
+end
+
+local function is_reusable_normal_buffer(bufnr, excluded_bufnr)
+    if not bufnr or bufnr == 0 or bufnr == excluded_bufnr then
+        return false
+    end
+    if not vim.api.nvim_buf_is_valid(bufnr) then
+        return false
+    end
+    if vim.bo[bufnr].buftype ~= '' or not vim.bo[bufnr].buflisted then
+        return false
+    end
+
+    if is_empty_normal_buffer(bufnr) then
+        return false
+    end
+    return true
+end
+
+local function remember_window_buffer(winid, bufnr)
+    if not M.is_window_valid(winid) or not M.is_buffer_valid(bufnr) then
+        return
+    end
+
+    local current_buf = vim.api.nvim_win_get_buf(winid)
+    if is_reusable_normal_buffer(current_buf, bufnr) then
+        vim.w[winid].previous_normal_buffer = current_buf
+    end
+end
+
+local function get_replacement_buffer(winid, excluded_bufnr)
+    if M.is_window_valid(winid) then
+        local previous_buf = vim.w[winid].previous_normal_buffer
+        if is_reusable_normal_buffer(previous_buf, excluded_bufnr) then
+            return previous_buf
+        end
+    end
+
+    local alternate_buf = vim.fn.bufnr('#')
+    if is_reusable_normal_buffer(alternate_buf, excluded_bufnr) then
+        return alternate_buf
+    end
+
+    local bufinfo = vim.fn.getbufinfo({ buflisted = 1 })
+    table.sort(bufinfo, function(a, b)
+        return (a.lastused or 0) > (b.lastused or 0)
+    end)
+    for _, info in ipairs(bufinfo) do
+        if is_reusable_normal_buffer(info.bufnr, excluded_bufnr) then
+            return info.bufnr
+        end
+    end
+
+    return nil
 end
 
 -- Check if a buffer is displayed in any window.
@@ -117,21 +167,8 @@ end
 function M.find_empty_buffer_window()
     for _, win in ipairs(vim.api.nvim_list_wins()) do
         local buf = vim.api.nvim_win_get_buf(win)
-        -- Must be listed
-        if vim.bo[buf].buflisted
-            -- Must be normal buffer
-            and vim.bo[buf].buftype == ""
-            -- Must be unnamed
-            and vim.api.nvim_buf_get_name(buf) == ""
-            -- Must not be modified
-            and not vim.bo[buf].modified
-            -- Must have exactly one line
-            and vim.api.nvim_buf_line_count(buf) == 1
-        then
-            local line = vim.api.nvim_buf_get_lines(buf, 0, 1, false)[1]
-            if line == "" then
-              return win
-            end
+        if is_empty_normal_buffer(buf) then
+            return win
         end
     end
     return nil
@@ -142,6 +179,7 @@ function M.create_window_for_buffer(bufnr)
     -- Before creating a new window, check for an empty buffer window to reuse.
     local empty_winid = M.find_empty_buffer_window()
     if empty_winid then
+        remember_window_buffer(empty_winid, bufnr)
         vim.api.nvim_win_set_buf(empty_winid, bufnr)
         M.set_current_window(empty_winid)
         return empty_winid
@@ -149,6 +187,7 @@ function M.create_window_for_buffer(bufnr)
     -- If no empty buffer window is found, split a new one.
     vim.cmd("vsplit")
     local winid = vim.api.nvim_get_current_win()
+    remember_window_buffer(winid, bufnr)
     vim.api.nvim_win_set_buf(winid, bufnr)
     return winid
 end
@@ -182,19 +221,35 @@ function M.reuse_or_create_window_for_buffer(bufnr)
     end
 end
 
--- Check if a buffer is displayed in a specific window.
-function M.is_buffer_displayed_in_window(bufnr, winid)
-    if not M.is_window_valid(winid) then
-        return false
-    end
-    local win_bufnr = vim.api.nvim_win_get_buf(winid)
-    return win_bufnr == bufnr
-end
-
 -- Close a window by its ID.
 function M.close_window(winid)
     if M.is_window_valid(winid) then
         vim.api.nvim_win_close(winid, true)
+    end
+end
+
+-- Replace a tool window with the previous real buffer, or an empty buffer if none exists.
+function M.dismiss_buffer_window(winid, bufnr)
+    if not M.is_window_valid(winid) then
+        if bufnr and vim.api.nvim_buf_is_valid(bufnr) and not M.is_buffer_displayed(bufnr) then
+            pcall(vim.api.nvim_buf_delete, bufnr, { force = true })
+        end
+        return
+    end
+
+    local replacement = get_replacement_buffer(winid, bufnr)
+    if replacement then
+        vim.api.nvim_win_set_buf(winid, replacement)
+        vim.w[winid].previous_normal_buffer = nil
+    else
+        vim.api.nvim_win_call(winid, function()
+            vim.cmd('enew')
+        end)
+        vim.w[winid].previous_normal_buffer = nil
+    end
+
+    if bufnr and vim.api.nvim_buf_is_valid(bufnr) and not M.is_buffer_displayed(bufnr) then
+        pcall(vim.api.nvim_buf_delete, bufnr, { force = true })
     end
 end
 
@@ -213,6 +268,7 @@ end
 -- Set buffer for a given window ID.
 function M.set_window_buffer(winid, bufnr)
     if M.is_window_valid(winid) and M.is_buffer_valid(bufnr) then
+        remember_window_buffer(winid, bufnr)
         vim.api.nvim_win_set_buf(winid, bufnr)
     end
 end

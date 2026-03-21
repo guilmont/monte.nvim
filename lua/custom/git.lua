@@ -334,19 +334,7 @@ end
 
 local function close_git_window(buf)
     local win = utils.find_window_by_buffer(buf)
-    if win then
-        local ok = pcall(utils.close_window, win)
-        if ok then
-            return
-        end
-    end
-
-    -- If this is the last window, :close can fail. In that case, replace the
-    -- current window buffer and wipe the Git buffer.
-    if vim.api.nvim_get_current_buf() == buf then
-        vim.cmd('enew')
-    end
-    pcall(vim.api.nvim_buf_delete, buf, { force = true })
+    utils.dismiss_buffer_window(win, buf)
 end
 
 local function initialize_buffer()

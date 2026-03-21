@@ -733,6 +733,10 @@ local function initialize_buffer()
     local buf = utils.create_scratch_buffer(BUFFER_NAME, false)
     -- Setup keymaps for the buffer
     local opts = { buffer = buf, nowait = true, noremap = true, silent = true }
+    vim.keymap.set('n', 'q', function()
+        local win = utils.find_window_by_buffer(buf)
+        utils.dismiss_buffer_window(win, buf)
+    end, opts)
     vim.keymap.set('n', '<CR>', input_action, opts)
     vim.keymap.set('n', 'r', revert_files, opts)
     vim.keymap.set('n', 'm', move_files, opts)

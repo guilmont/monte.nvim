@@ -397,7 +397,7 @@ end
 local function initialize_keymaps(window, buffer)
     -- Keymap to close the output window
     vim.keymap.set('n', 'q', function()
-        utils.close_window(window)
+        utils.dismiss_buffer_window(window, buffer)
     end, { buffer = buffer, desc = 'Close Run Output Window' })
 
     -- Set up keymap for navigating to file:line under cursor
