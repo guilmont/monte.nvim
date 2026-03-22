@@ -4,11 +4,16 @@ return {
     -- Disable default Tab mapping so Tab remains indentation/navigation.
     vim.g.copilot_no_tab_map = true
 
-    -- Accept suggestion with Alt+Enter.
-    vim.keymap.set('i', '<M-CR>', function()
+    function accept_copilot()
       return vim.fn['copilot#Accept']('')
-    end,
+    end
+
+    -- Accept suggestion with Alt+Enter.
+    vim.keymap.set('i', '<M-CR>', accept_copilot,
       { expr = true, replace_keycodes = false, silent = true, desc = 'Accept Copilot (Alt+Enter)' })
+    -- Alt+Enter is used on windows terminal to maximize the window.
+    vim.keymap.set('i', '<M-a>', accept_copilot,
+      { expr = true, replace_keycodes = false, silent = true, desc = 'Accept Copilot (Ctrl+Enter)' })
 
     -- Navigate between suggestions
     vim.keymap.set('i', '<M-]>', '<Plug>(copilot-next)', { silent = true, desc = 'Next Copilot suggestion' })
