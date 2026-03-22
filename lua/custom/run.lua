@@ -60,16 +60,17 @@ local function complete_run_command(arg_lead, cmd_line, cursor_pos)
     local is_environment_var = arg_lead:match('^%$%a*') ~= nil
 
     -- Path-based completion for absolute (/...), relative (./, ../, sub/...), or ~ paths
-    if arg_lead:find('/') or arg_lead:sub(1,1) == '~' then
-        local dir = arg_lead:match('(.*/)') or './'
+    local path_sep = package.config:sub(1,1) -- Get path separator for current OS
+    if arg_lead:find(path_sep, 1, true) or arg_lead:sub(1,1) == '~' then
+        local dir = arg_lead:match('(.*' .. path_sep .. ')') or '.' .. path_sep
         local base = arg_lead:sub(#dir + 1)
 
         local expanded_dir = vim.fn.expand(dir)
         if vim.fn.isdirectory(expanded_dir) == 0 then
             return {}
         end
-        if expanded_dir:sub(-1) ~= '/' then
-            expanded_dir = expanded_dir .. '/'
+        if expanded_dir:sub(-1) ~= path_sep then
+            expanded_dir = expanded_dir .. path_sep
         end
 
         local entries = vim.fn.readdir(expanded_dir)
@@ -78,7 +79,7 @@ local function complete_run_command(arg_lead, cmd_line, cursor_pos)
             if name ~= '.' and name ~= '..' and name:sub(1, #base) == base then
                 local full = expanded_dir .. name
                 local is_dir = vim.fn.isdirectory(full) == 1
-                local display = dir .. name .. (is_dir and '/' or '')
+                local display = dir .. name .. (is_dir and path_sep or '')
                 if is_dir or (not is_command_start) or (vim.fn.executable(full) == 1) then
                     table.insert(matches, display)
                 end
