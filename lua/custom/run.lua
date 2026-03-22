@@ -144,6 +144,7 @@ local run_command = nil  -- Forward function declaration
 local last_command = nil
 local running_job = nil
 local command_start_time = nil  -- Track when command started
+local run_sequence = 0 -- Incremented each run to ignore stale callbacks
 
 local ansi_namespace = nil
 local current_ansi_state = nil  -- Tracks ANSI state across lines
@@ -600,19 +601,31 @@ run_command = function(cmd)
 
     -- Store last command and capture start time
     last_command = cmd
+    -- Bump run sequence so any callbacks from previous jobs are ignored
+    run_sequence = run_sequence + 1
+    local this_run = run_sequence
     command_start_time = vim.loop.now()
     -- Reset navigation marks
     navigation_marks = {}
-    -- Initialize content
+    -- Initialize content (single trailing blank line)
     update_output({ '$ ' .. cmd, '', ''})
     -- Start async job
     local job_opts = {
         -- Allocate a PTY so tools think they're in a real terminal
         -- and emit ANSI colors (helps Cargo, npm, etc.)
         pty = true,
-        on_stdout = function(_, data) update_output(data) end,
-        on_stderr = function(_, data) update_output(data) end,
-        on_exit = on_complete,
+        on_stdout = function(_, data)
+            if this_run ~= run_sequence then return end
+            update_output(data)
+        end,
+        on_stderr = function(_, data)
+            if this_run ~= run_sequence then return end
+            update_output(data)
+        end,
+        on_exit = function(_, code)
+            if this_run ~= run_sequence then return end
+            on_complete(_, code)
+        end,
     }
     running_job = vim.fn.jobstart(cmd, job_opts)
 end
