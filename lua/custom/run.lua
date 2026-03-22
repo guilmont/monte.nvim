@@ -149,6 +149,8 @@ local current_ansi_state = nil  -- Tracks ANSI state across lines
 local navigation_marks = {}  -- Maps line numbers to file locations
 
 local has_carriage_return = false -- Used for overwrite detection
+-- Cheap OS detection: package.config first char is path separator ('\\' on Windows)
+local is_windows = package.config:sub(1,1) == '\\'
 
 --- Ensure extmark namespace exists even after module reloads
 local function ensure_ansi_namespace()
@@ -310,15 +312,26 @@ end
 --- Search for file:line or file:line:col patterns and set navigation marks
 local function search_locations(line, line_num)
     local ns_id = ensure_ansi_namespace()
+    local patterns = is_windows
+        and {
+            '([^%s%(]+)%((%d+)%)',
+            '([^%s:]+):(%d+):(%d+)',
+            '([^%s:]+):(%d+)'
+        }
+        or {
+            '([^%s:]+):(%d+):(%d+)',
+            '([^%s:]+):(%d+)',
+            '([^%s%(]+)%((%d+)%)'
+        }
+
     local pos = 1
     while pos <= #line do
-        -- Try matching file:line:col first
-        local s, e, file, lineno, colno = line:find('([^%s:]+):(%d+):(%d+)', pos)
-
-        -- If no match with column, try without column
-        if not s then
-            s, e, file, lineno = line:find('([^%s:]+):(%d+)', pos)
-            colno = nil
+        local s, e, file, lineno, colno
+        for _, pattern in ipairs(patterns) do
+            s, e, file, lineno, colno = line:find(pattern, pos)
+            if s then
+                break
+            end
         end
 
         if not s then break; end
