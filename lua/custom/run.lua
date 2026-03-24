@@ -62,7 +62,7 @@ local function complete_run_command(arg_lead, cmd_line, cursor_pos)
     -- Path-based completion for absolute (/...), relative (./, ../, sub/...), or ~ paths
     local path_sep = package.config:sub(1,1) -- Get path separator for current OS
     if arg_lead:find(path_sep, 1, true) or arg_lead:sub(1,1) == '~' then
-        local dir = (arg_lead:match('(.*' .. path_sep .. ')') or '.') .. path_sep
+        local dir = (arg_lead:match('(.*' .. path_sep .. ')') or '.')
         local base = arg_lead:sub(#dir + 1)
 
         local expanded_dir = vim.fn.expand(dir)
