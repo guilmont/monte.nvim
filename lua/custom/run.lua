@@ -11,7 +11,7 @@ local commands_cache = nil
 local environ_cache = nil
 
 --- Fill the commands cache from PATH
-function fill_commands_cache()
+local function fill_commands_cache()
     if commands_cache == nil then
         -- Build cache of executable commands in PATH
         local paths = vim.split(os.getenv('PATH') or '', ':')
@@ -33,7 +33,7 @@ function fill_commands_cache()
 end
 
 --- Fill environment variables cache
-function fill_environ_cache()
+local function fill_environ_cache()
     if environ_cache == nil then
         local env_vars = {}
         for k, _ in pairs(vim.fn.environ()) do
@@ -62,7 +62,7 @@ local function complete_run_command(arg_lead, cmd_line, cursor_pos)
     -- Path-based completion for absolute (/...), relative (./, ../, sub/...), or ~ paths
     local path_sep = package.config:sub(1,1) -- Get path separator for current OS
     if arg_lead:find(path_sep, 1, true) or arg_lead:sub(1,1) == '~' then
-        local dir = arg_lead:match('(.*' .. path_sep .. ')') or '.' .. path_sep
+        local dir = (arg_lead:match('(.*' .. path_sep .. ')') or '.') .. path_sep
         local base = arg_lead:sub(#dir + 1)
 
         local expanded_dir = vim.fn.expand(dir)
@@ -94,6 +94,9 @@ local function complete_run_command(arg_lead, cmd_line, cursor_pos)
             fill_commands_cache()
         end
         -- Filter cached commands based on arg_lead
+        if commands_cache == nil then
+            return {}
+        end
         local matches = {}
         for _, cmd in ipairs(commands_cache) do
             if cmd:sub(1, #arg_lead) == arg_lead then
@@ -107,6 +110,9 @@ local function complete_run_command(arg_lead, cmd_line, cursor_pos)
         -- If environment cache is empty, fill it
         if environ_cache == nil then
             fill_environ_cache()
+        end
+        if environ_cache == nil then
+            return {}
         end
         -- Filter cached environment variables based on arg_lead
         local env_vars = {}
@@ -150,7 +156,6 @@ local ansi_namespace = nil
 local current_ansi_state = nil  -- Tracks ANSI state across lines
 local navigation_marks = {}  -- Maps line numbers to file locations
 
-local has_carriage_return = false -- Used for overwrite detection
 -- Cheap OS detection: package.config first char is path separator ('\\' on Windows)
 local is_windows = package.config:sub(1,1) == '\\'
 
@@ -165,6 +170,20 @@ end
 -- ============================================================================
 -- Utility Functions
 -- ============================================================================
+-- Debug capture: set to true to write raw incoming chunks to a temp file for inspection
+local function debug_capture(chunks)
+    local debug_log_path = vim.fn.expand('%:p:h') .. '/run_command_debug.log'
+    local ok, f = pcall(io.open, debug_log_path, 'a')
+    if not ok or not f then return end
+    f:write('---- CHUNK BATCH ----\n')
+    for i, c in ipairs(chunks) do
+        f:write(string.format('[%d] LEN=%d: ', i, #c or 0))
+        f:write(c or '<nil>')
+        f:write('\n')
+    end
+    f:write('\n')
+    f:close()
+end
 
 --- Format elapsed time in milliseconds to a readable string
 local function format_elapsed_time(ms)
@@ -189,7 +208,7 @@ end
 
 --- Recompile - run the last command again
 local function rerun_last_command()
-    if last_command then
+    if run_command and last_command then
         run_command(last_command)
     else
         vim.notify('No previous command to re-run', vim.log.levels.WARN)
@@ -225,7 +244,7 @@ local function get_ansi_highlight(code)
 end
 
 --- Parse terminal control sequences (SGR/CSI/OSC/CR) and apply highlighting
-local function parse_terminal_sequences(line)
+local function parse_terminal_sequences(chunk)
     local clean_text = ''
     local highlights = {}
     local current_hl = current_ansi_state
@@ -235,15 +254,16 @@ local function parse_terminal_sequences(line)
     -- Strip ANSI codes, carriage returns, and track positions
     local i = 1
     local has_cr = false
-    while i <= #line do
-        local byte = line:byte(i)
+    while i <= #chunk do
+        local byte = chunk:byte(i)
         -- Handle carriage return (CR, ^M, \r): ignore to avoid rendering artifacts
         if byte == 13 then
-            has_cr = true
+            -- On windows, lines may end with CRLF, so only treat as CR if not at end of chunk
+            has_cr = has_cr or i < #chunk
             i = i + 1
-        elseif byte == 27 and line:sub(i + 1, i + 1) == '[' then
+        elseif byte == 27 and chunk:sub(i + 1, i + 1) == '[' then
             -- Found ANSI CSI sequence: ESC [ params final
-            local rest = line:sub(i + 2)
+            local rest = chunk:sub(i + 2)
             local letter_pos = rest:find('%a')
             if letter_pos then
                 local final = rest:sub(letter_pos, letter_pos)
@@ -258,8 +278,11 @@ local function parse_terminal_sequences(line)
                     local code = params
                     current_hl = (code == '0' or code == '') and nil or get_ansi_highlight(code)
                     hl_start = current_hl and pos or nil
+                elseif final == 'H' then
+                    -- \x1b[H (ESC [ H) replaces the role of \r in some tools.
+                    has_cr = true
                 else
-                    -- Non-SGR CSI (e.g., K to erase line, cursor moves, etc.)
+                    -- Non-SGR CSI (e.g., K to erase chunk, cursor moves, etc.)
                     -- Ignore sequence: do not emit literal text and keep style state.
                 end
 
@@ -269,19 +292,19 @@ local function parse_terminal_sequences(line)
                 -- Malformed CSI, skip ESC
                 i = i + 1
             end
-        elseif byte == 27 and line:sub(i + 1, i + 1) == ']' then
+        elseif byte == 27 and chunk:sub(i + 1, i + 1) == ']' then
             -- Handle OSC (Operating System Command) sequences, e.g., OSC 8 hyperlinks
             -- Format: ESC ] ... BEL (0x07) OR ESC \ (String Terminator)
             local j = i + 2
             local consumed = false
-            while j <= #line do
-                local b = line:byte(j)
+            while j <= #chunk do
+                local b = chunk:byte(j)
                 if b == 7 then
                     -- BEL terminator
                     i = j + 1
                     consumed = true
                     break
-                elseif b == 27 and j + 1 <= #line and line:sub(j + 1, j + 1) == '\\' then
+                elseif b == 27 and j + 1 <= #chunk and chunk:sub(j + 1, j + 1) == '\\' then
                     -- ESC \ terminator
                     i = j + 2
                     consumed = true
@@ -296,7 +319,7 @@ local function parse_terminal_sequences(line)
             end
         else
             -- Regular character
-            clean_text = clean_text .. line:sub(i, i)
+            clean_text = clean_text .. chunk:sub(i, i)
             pos = pos + 1
             i = i + 1
         end
@@ -433,13 +456,13 @@ local function initialize_keymaps(window, buffer)
                 or utils.find_alternate_real_window(window)
 
             -- Check if file is already open in a window
-            local buffer = utils.find_buffer_by_name(mark.file)
-            if buffer and target_win then
-                utils.set_window_buffer(target_win, buffer)
+            local other = utils.find_buffer_by_name(mark.file)
+            if other and target_win then
+                utils.set_window_buffer(target_win, other)
                 utils.set_current_window(target_win)
                 utils.set_cursor_position(target_win, mark.line, mark.col)
-            elseif buffer then
-                local win = utils.reuse_or_create_window_for_buffer(buffer)
+            elseif other then
+                local win = utils.reuse_or_create_window_for_buffer(other)
                 utils.set_cursor_position(win, mark.line, mark.col)
             elseif target_win then
                 utils.set_current_window(target_win)
@@ -529,28 +552,28 @@ local function update_output(data)
             at_bottom = curr_line == 1 or curr_line == line_count
          end
 
+        -- Capture raw chunks for debugging if needed
+        -- debug_capture(data)
         -- Go thru each chunk of new data
         for idx, chunk in ipairs(data) do
             local offset = 0
-            local line, highlights, has_cr = parse_terminal_sequences(chunk)
+            local clean_chunk, highlights, has_cr = parse_terminal_sequences(chunk)
 
             if idx == 1 then
-                if not has_carriage_return then
+                if not has_cr then
                     local last_line = utils.get_buffer_lines(buffer, -2, -1)[1] or ''
-                    line = last_line .. line
+                    clean_chunk = last_line .. clean_chunk
                     offset = #last_line
                 end
 
-                utils.set_buffer_lines(buffer, -2, -1, { line })
+                utils.set_buffer_lines(buffer, -2, -1, { clean_chunk })
             else
-                utils.set_buffer_lines(buffer, -1, -1, { line })
+                utils.set_buffer_lines(buffer, -1, -1, { clean_chunk })
             end
-            -- Update carriage return state for next input data
-            has_carriage_return = has_cr
 
             local line_num = utils.get_buffer_line_count(buffer) - 1
             -- Search for file:line patterns and set navigation marks
-            search_locations(line, line_num)
+            search_locations(clean_chunk, line_num)
 
             -- Apply highlight ranges (offset by existing line length if appending)
             for _, hl in ipairs(highlights) do
