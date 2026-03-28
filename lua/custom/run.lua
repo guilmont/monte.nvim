@@ -171,6 +171,19 @@ end
 -- Utility Functions
 -- ============================================================================
 -- Debug capture: set to true to write raw incoming chunks to a temp file for inspection
+local function pretty_chunk(c)
+    local out = ''
+    for i = 1, #c do
+        local byte = c:byte(i)
+        if byte >= 32 and byte <= 126 then
+            out = out .. string.char(byte)
+        else
+            out = out .. string.format('<%d>', byte)
+        end
+    end
+    return out
+end
+
 local function debug_capture(chunks)
     local debug_log_path = vim.fn.expand('%:p:h') .. '/run_command_debug.log'
     local ok, f = pcall(io.open, debug_log_path, 'a')
@@ -178,7 +191,7 @@ local function debug_capture(chunks)
     f:write('---- CHUNK BATCH ----\n')
     for i, c in ipairs(chunks) do
         f:write(string.format('[%d] LEN=%d: ', i, #c or 0))
-        f:write(c or '<nil>')
+        f:write(pretty_chunk(c))
         f:write('\n')
     end
     f:write('\n')
