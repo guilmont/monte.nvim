@@ -154,6 +154,7 @@ local run_sequence = 0 -- Incremented each run to ignore stale callbacks
 
 local ansi_namespace = nil
 local current_ansi_state = nil  -- Tracks ANSI state across lines
+local current_line_position = 1
 local navigation_marks = {}  -- Maps line numbers to file locations
 
 -- Cheap OS detection: package.config first char is path separator ('\\' on Windows)
@@ -256,96 +257,6 @@ local function get_ansi_highlight(code)
     end
 end
 
---- Parse terminal control sequences (SGR/CSI/OSC/CR) and apply highlighting
-local function parse_terminal_sequences(chunk)
-    local clean_text = ''
-    local highlights = {}
-    local current_hl = current_ansi_state
-    local pos = 0
-    local hl_start = current_hl and 0 or nil
-
-    -- Strip ANSI codes, carriage returns, and track positions
-    local i = 1
-    local has_cr = false
-    while i <= #chunk do
-        local byte = chunk:byte(i)
-        -- Handle carriage return (CR, ^M, \r): ignore to avoid rendering artifacts
-        if byte == 13 then
-            -- On windows, lines may end with CRLF, so only treat as CR if not at end of chunk
-            has_cr = has_cr or i < #chunk
-            i = i + 1
-        elseif byte == 27 and chunk:sub(i + 1, i + 1) == '[' then
-            -- Found ANSI CSI sequence: ESC [ params final
-            local rest = chunk:sub(i + 2)
-            local letter_pos = rest:find('%a')
-            if letter_pos then
-                local final = rest:sub(letter_pos, letter_pos)
-                local params = rest:sub(1, letter_pos - 1)
-
-                if final == 'm' then
-                    -- Close previous highlight range before style change
-                    if current_hl and hl_start then
-                        table.insert(highlights, { hl = current_hl, start = hl_start, stop = pos })
-                    end
-                    -- Parse SGR parameters and update style state
-                    local code = params
-                    current_hl = (code == '0' or code == '') and nil or get_ansi_highlight(code)
-                    hl_start = current_hl and pos or nil
-                elseif final == 'H' then
-                    -- \x1b[H (ESC [ H) replaces the role of \r in some tools.
-                    has_cr = true
-                else
-                    -- Non-SGR CSI (e.g., K to erase chunk, cursor moves, etc.)
-                    -- Ignore sequence: do not emit literal text and keep style state.
-                end
-
-                local end_pos = i + 1 + letter_pos
-                i = end_pos + 1
-            else
-                -- Malformed CSI, skip ESC
-                i = i + 1
-            end
-        elseif byte == 27 and chunk:sub(i + 1, i + 1) == ']' then
-            -- Handle OSC (Operating System Command) sequences, e.g., OSC 8 hyperlinks
-            -- Format: ESC ] ... BEL (0x07) OR ESC \ (String Terminator)
-            local j = i + 2
-            local consumed = false
-            while j <= #chunk do
-                local b = chunk:byte(j)
-                if b == 7 then
-                    -- BEL terminator
-                    i = j + 1
-                    consumed = true
-                    break
-                elseif b == 27 and j + 1 <= #chunk and chunk:sub(j + 1, j + 1) == '\\' then
-                    -- ESC \ terminator
-                    i = j + 2
-                    consumed = true
-                    break
-                else
-                    j = j + 1
-                end
-            end
-            if not consumed then
-                -- Reached end without terminator; drop the remainder
-                i = j
-            end
-        else
-            -- Regular character
-            clean_text = clean_text .. chunk:sub(i, i)
-            pos = pos + 1
-            i = i + 1
-        end
-    end
-
-    -- Close final highlight
-    if current_hl and hl_start then
-        table.insert(highlights, { hl = current_hl, start = hl_start, stop = pos })
-    end
-
-    current_ansi_state = current_hl
-    return clean_text, highlights, has_cr
-end
 
 --- Search for file:line or file:line:col patterns and set navigation marks
 local function search_locations(line, line_num)
@@ -391,6 +302,177 @@ local function search_locations(line, line_num)
         pos = e + 1
     end
 end
+
+--- Parse terminal control sequences (SGR/CSI/OSC/CR) and apply highlighting
+local function handle_chunk(input, buffer)
+    if #input == 0 then return end
+
+    -- Build a byte array for existing current line content
+    local current_line = utils.get_buffer_lines(buffer, -2, -1)[1] or ''
+    local out_bytes = {}
+    for p = 1, #current_line do out_bytes[#out_bytes + 1] = current_line:byte(p) end
+
+    local ns_id = ensure_ansi_namespace()
+    local highlights = {}
+    local current_hl = current_ansi_state
+    local pos = current_line_position - 1
+    local hl_start = current_hl and pos or nil
+
+    local i = 1
+    while i <= #input do
+        local b = input:byte(i)
+        -- Carriage return: move write cursor to start of line
+        if b == 13 then
+            -- Close any active highlight for this line before CR
+            if current_hl and hl_start then
+                table.insert(highlights, { hl = current_hl, start = hl_start, stop = pos })
+                hl_start = nil
+            end
+            current_line_position = 1
+            pos = 0
+            i = i + 1
+
+        elseif b == 27 then
+            -- Escape: parse control sequence
+            local next_ch = input:sub(i + 1, i + 1)
+            if next_ch == '[' then
+                -- CSI sequence: collect params up to final byte
+                local j = i + 2
+                while j <= #input and not (input:byte(j) >= 64 and input:byte(j) <= 126) do
+                    j = j + 1
+                end
+                if j <= #input then
+                    local final = input:sub(j, j)
+                    local params = input:sub(i + 2, j - 1)
+                    if final == 'm' then
+                        -- SGR - styling change
+                        if current_hl and hl_start then
+                            table.insert(highlights, { hl = current_hl, start = hl_start, stop = pos })
+                        end
+                        local code = params or ''
+                        current_hl = (code == '' or code == '0') and nil or get_ansi_highlight(code)
+                        hl_start = current_hl and pos or nil
+                    elseif final == 'K' then
+                        -- EL (Erase in Line) handling
+                        local n = tonumber(params) or 0
+                        if n == 0 then
+                            -- erase from cursor to end of line
+                            for idx = current_line_position, #out_bytes do out_bytes[idx] = nil end
+                            pos = current_line_position - 1
+                        elseif n == 1 then
+                            -- erase from start to cursor: shift remaining to line start
+                            local start_idx = current_line_position
+                            local new_bytes = {}
+                            for idx = start_idx, #out_bytes do
+                                new_bytes[#new_bytes + 1] = out_bytes[idx]
+                            end
+                            out_bytes = new_bytes
+                            current_line_position = 1
+                            pos = #out_bytes
+                        elseif n == 2 then
+                            -- erase entire line
+                            out_bytes = {}
+                            current_line_position = 1
+                            pos = 0
+                        end
+                    elseif final == 'J' then
+                        -- ED (Erase Display) handling (ignore it for now)
+                        -- local n = tonumber(params) or 0
+                        -- if n == 0 then
+                        --     -- erase from cursor to end of screen (approx: to end of current line)
+                        --     for idx = current_line_position, #out_bytes do out_bytes[idx] = nil end
+                        --     pos = current_line_position - 1
+                        -- elseif n == 1 then
+                        --     -- erase from start to cursor (approx: clear current line and keep remainder)
+                        --     out_bytes = {}
+                        --     current_line_position = 1
+                        --     pos = 0
+                        -- elseif n == 2 then
+                        --     -- erase entire screen -> reset whole buffer
+                        --     out_bytes = {}
+                        --     utils.reset_buffer_content(buffer)
+                        --     current_line_position = 1
+                        --     pos = 0
+                        -- end
+                    elseif final == 'H' or final == 'f' then
+                        -- Cursor position (home): move to line start
+                        current_line_position = 1
+                        pos = 0
+                        out_bytes = {}
+                    elseif final == 'l' or final == 'h' then
+                        -- Private-mode set/reset (eg. ?25l / ?25h for cursor visibility) - ignore
+                    end
+                    j = j + 1
+                    i = j
+                else
+                    -- Malformed CSI: skip ESC
+                    i = i + 1
+                end
+            elseif next_ch == ']' then
+                -- OSC sequence: skip until BEL (7) or ESC '\' terminator
+                local j2 = i + 2
+                while j2 <= #input do
+                    local cb = input:byte(j2)
+                    if cb == 7 then
+                        j2 = j2 + 1
+                        break
+                    end
+                    if cb == 27 and input:sub(j2 + 1, j2 + 1) == '\\' then
+                        j2 = j2 + 2
+                        break
+                    end
+                    j2 = j2 + 1
+                end
+                i = j2
+            else
+                -- Unknown ESC sequence: skip ESC
+                i = i + 1
+            end
+        else
+            -- Regular byte: append/overwrite at current position
+            out_bytes[current_line_position] = b
+            current_line_position = current_line_position + 1
+            pos = pos + 1
+            i = i + 1
+        end
+    end
+
+    -- Close any open highlight at end of chunk
+    if current_hl and hl_start then
+        table.insert(highlights, { hl = current_hl, start = hl_start, stop = pos })
+    end
+
+    -- Assemble final line from bytes (avoid nils in sparse arrays)
+    local final_line = ''
+    local written_len = math.max(#out_bytes, current_line_position - 1, pos)
+    if written_len > 0 then
+        local parts = {}
+        for idx = 1, written_len do
+            local byte = out_bytes[idx] or 32 -- fill missing with space
+            parts[idx] = string.char(byte)
+        end
+        final_line = table.concat(parts)
+    end
+    utils.set_buffer_lines(buffer, -2, -1, { final_line })
+
+    -- Apply highlight extmarks for this line
+    local line_num = utils.get_buffer_line_count(buffer) - 1
+    for _, hl in ipairs(highlights) do
+        if hl.stop > hl.start then
+            vim.api.nvim_buf_set_extmark(buffer, ns_id, line_num, hl.start, {
+                end_col = hl.stop,
+                hl_group = hl.hl,
+            })
+        end
+    end
+
+    -- Search for file:line patterns and set navigation marks
+    search_locations(final_line, line_num)
+
+    -- Save ANSI state back
+    current_ansi_state = current_hl
+end
+
 
 
 -- ============================================================================
@@ -540,9 +622,6 @@ local function initialize_buffer()
         -- Setup syntax highlighting and keymaps for the buffer
         initialize_syntax_highlighting(buffer)
     end
-    -- Set first line with current working directory for context
-    utils.set_buffer_lines(buffer, 0, -1, { '@ ' .. vim.fn.getcwd(), '' })
-
     return buffer
 end
 
@@ -567,34 +646,18 @@ local function update_output(data)
 
         -- Capture raw chunks for debugging if needed
         -- debug_capture(data)
-        -- Go thru each chunk of new data
+        -- stdout and stderr are not emitted immediately, they are accumulated and emitted
+        -- in batches upon flush. Neovim emits a different chunk for each line emitted into
+        -- stack prior to flush.
         for idx, chunk in ipairs(data) do
-            local offset = 0
-            local clean_chunk, highlights, has_cr = parse_terminal_sequences(chunk)
-
-            if idx == 1 then
-                if not has_cr then
-                    local last_line = utils.get_buffer_lines(buffer, -2, -1)[1] or ''
-                    clean_chunk = last_line .. clean_chunk
-                    offset = #last_line
-                end
-
-                utils.set_buffer_lines(buffer, -2, -1, { clean_chunk })
-            else
-                utils.set_buffer_lines(buffer, -1, -1, { clean_chunk })
+            -- More then one chunk means the flush has emitted multiple lines,
+            -- so we can safely append a new empty line for the next chunk.
+            if idx > 1 then
+                utils.set_buffer_lines(buffer, -1, -1, { '' })
+                current_line_position = 1
             end
-
-            local line_num = utils.get_buffer_line_count(buffer) - 1
-            -- Search for file:line patterns and set navigation marks
-            search_locations(clean_chunk, line_num)
-
-            -- Apply highlight ranges (offset by existing line length if appending)
-            for _, hl in ipairs(highlights) do
-                vim.api.nvim_buf_set_extmark(buffer, ns_id, line_num, hl.start + offset, {
-                    end_col = hl.stop + offset,
-                    hl_group = hl.hl,
-                })
-            end
+            -- Process the chunk to handle ANSI codes and update buffer content
+            handle_chunk(chunk, buffer)
         end
 
         -- If window is displayed, auto-scroll to bottom if cursor was already at the end
@@ -643,8 +706,11 @@ run_command = function(cmd)
     command_start_time = vim.loop.now()
     -- Reset navigation marks
     navigation_marks = {}
-    -- Initialize content (single trailing blank line)
-    update_output({ '$ ' .. cmd, '', ''})
+    -- Reset buffer content and ANSI state for new command
+    utils.reset_buffer_content(buffer)
+    current_line_position = 1
+    -- Initially populate buffer with command info
+    update_output({ '@ ' .. vim.fn.getcwd(), '$ ' .. cmd, '', ''})
     -- Start async job
     local job_opts = {
         -- Allocate a PTY so tools think they're in a real terminal
