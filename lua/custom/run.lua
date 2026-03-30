@@ -505,10 +505,17 @@ local function handle_chunk(input, buffer)
                         --     pos = 0
                         -- end
                     elseif final == 'H' or final == 'f' then
-                        -- Cursor position (home): move to line start
-                        current_line_position = 1
-                        pos = 0
-                        out_bytes = {}
+                        -- Cursor position: move to specified column (params = 'row;col' or 'row')
+                        local row_str, col_str = params:match('(%d*);?(%d*)')
+                        local col = tonumber(col_str) or tonumber(row_str) or 1
+                        col = math.max(1, col)
+                        -- Ensure out_bytes has space up to the target column - 1
+                        local needed = col - 1
+                        if #out_bytes < needed then
+                            for k = #out_bytes + 1, needed do out_bytes[k] = 32 end
+                        end
+                        current_line_position = col
+                        pos = current_line_position - 1
                     elseif final == 'l' or final == 'h' then
                         -- Private-mode set/reset (eg. ?25l / ?25h for cursor visibility) - ignore
                     end
