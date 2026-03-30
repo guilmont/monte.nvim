@@ -153,7 +153,7 @@ local command_start_time = nil  -- Track when command started
 local run_sequence = 0 -- Incremented each run to ignore stale callbacks
 
 local ansi_namespace = nil
-local current_ansi_state = nil  -- Tracks ANSI state across lines
+local current_ansi_state = nil  -- Tracks ANSI state across lines (table: {fg,bg,attrs})
 local current_line_position = 1
 local navigation_marks = {}  -- Maps line numbers to file locations
 local ansi_hl_cache = {}
@@ -231,18 +231,14 @@ local function rerun_last_command()
 end
 
 --- Map ANSI color codes to highlight groups
-local function get_ansi_highlight(code)
-    -- Extended ANSI handling: supports standard, 256-color (38;5;n / 48;5;n)
-    -- and truecolor (38;2;r;g;b / 48;2;r;g;b). Generates dynamic highlight
-    -- groups and caches them.
-
+local function parse_sgr_parts(params, state)
+    -- params: string like '34' or '1;38;5;196'
+    -- state: existing table to mutate (or nil)
     local function clamp(v, a, b) v = tonumber(v) or 0 if v < a then return a end if v > b then return b end return v end
-
     local function xterm256_to_hex(n)
         n = tonumber(n) or 0
         if n < 0 then n = 0 end
         if n > 255 then n = 255 end
-        -- 0-15: system colors
         local ansi16 = {
             {0,0,0},{128,0,0},{0,128,0},{128,128,0},{0,0,128},{128,0,128},{0,128,128},{192,192,192},
             {128,128,128},{255,0,0},{0,255,0},{255,255,0},{0,0,255},{255,0,255},{0,255,255},{255,255,255}
@@ -258,59 +254,73 @@ local function get_ansi_highlight(code)
             local function level(x) return x == 0 and 0 or 55 + x * 40 end
             return string.format('#%02x%02x%02x', level(r), level(g), level(b))
         else
-            -- grayscale 232..255
             local gray = 8 + (n - 232) * 10
             return string.format('#%02x%02x%02x', gray, gray, gray)
         end
     end
 
-    local parts = vim.split(code or '', ';')
-    if #parts == 0 or ( #parts == 1 and (parts[1] == '' or parts[1] == '0') ) then
-        return nil
-    end
+    local parts = vim.split(params or '', ';')
+    if not state then state = { fg = nil, bg = nil, attrs = { bold = false, italic = false, underline = false, strikethrough = false } } end
 
-    local fg, bg = nil, nil
-    local attrs = { bold = false, italic = false, underline = false, strikethrough = false }
     local i = 1
     while i <= #parts do
         local p = parts[i]
-        if p == '1' then attrs.bold = true
-        elseif p == '3' then attrs.italic = true
-        elseif p == '4' then attrs.underline = true
-        elseif p == '9' then attrs.strikethrough = true
+        if p == '' then
+            -- reset
+            state = { fg = nil, bg = nil, attrs = { bold = false, italic = false, underline = false, strikethrough = false } }
+        elseif p == '0' then
+            state = { fg = nil, bg = nil, attrs = { bold = false, italic = false, underline = false, strikethrough = false } }
+        elseif p == '1' then state.attrs.bold = true
+        elseif p == '3' then state.attrs.italic = true
+        elseif p == '4' then state.attrs.underline = true
+        elseif p == '9' then state.attrs.strikethrough = true
         elseif tonumber(p) and tonumber(p) >= 30 and tonumber(p) <= 37 then
             local base = {['30']='#000000',['31']='#800000',['32']='#008000',['33']='#808000',['34']='#000080',['35']='#800080',['36']='#008080',['37']='#c0c0c0'}
-            fg = base[p]
+            state.fg = base[p]
         elseif tonumber(p) and tonumber(p) >= 90 and tonumber(p) <= 97 then
             local b2 = {['90']='#808080',['91']='#ff0000',['92']='#00ff00',['93']='#ffff00',['94']='#0000ff',['95']='#ff00ff',['96']='#00ffff',['97']='#ffffff'}
-            fg = b2[p]
+            state.fg = b2[p]
         elseif tonumber(p) and tonumber(p) >= 40 and tonumber(p) <= 47 then
             local base_bg = {['40']='#000000',['41']='#800000',['42']='#008000',['43']='#808000',['44']='#000080',['45']='#800080',['46']='#008080',['47']='#c0c0c0'}
-            bg = base_bg[p]
+            state.bg = base_bg[p]
         elseif tonumber(p) and tonumber(p) >= 100 and tonumber(p) <= 107 then
             local bg2 = {['100']='#808080',['101']='#ff0000',['102']='#00ff00',['103']='#ffff00',['104']='#0000ff',['105']='#ff00ff',['106']='#00ffff',['107']='#ffffff'}
-            bg = bg2[p]
+            state.bg = bg2[p]
         elseif p == '38' or p == '48' then
-            -- extended color sequences
             local is_fg = p == '38'
             local mode = parts[i+1]
             if mode == '5' then
                 local n = tonumber(parts[i+2]) or 0
                 local hex = xterm256_to_hex(n)
-                if is_fg then fg = hex else bg = hex end
+                if is_fg then state.fg = hex else state.bg = hex end
                 i = i + 2
             elseif mode == '2' then
                 local r = clamp(parts[i+2], 0, 255)
                 local g = clamp(parts[i+3], 0, 255)
                 local b = clamp(parts[i+4], 0, 255)
                 local hex = string.format('#%02x%02x%02x', r, g, b)
-                if is_fg then fg = hex else bg = hex end
+                if is_fg then state.fg = hex else state.bg = hex end
                 i = i + 4
             end
         end
         i = i + 1
     end
 
+    return state
+end
+
+
+local function get_ansi_highlight(code_or_state)
+    -- Accept either an SGR param string or a state table
+    local state = nil
+    if type(code_or_state) == 'table' then
+        state = code_or_state
+    else
+        state = parse_sgr_parts(code_or_state, nil)
+    end
+
+    if not state then return nil end
+    local fg, bg, attrs = state.fg, state.bg, state.attrs or {}
     if not fg and not bg and not (attrs.bold or attrs.italic or attrs.underline or attrs.strikethrough) then
         return nil
     end
@@ -406,7 +416,8 @@ local function handle_chunk(input, buffer)
 
     local ns_id = ensure_ansi_namespace()
     local highlights = {}
-    local current_hl = current_ansi_state
+    local current_state = current_ansi_state
+    local current_hl = current_state and get_ansi_highlight(current_state) or nil
     local pos = current_line_position - 1
     local hl_start = current_hl and pos or nil
 
@@ -437,13 +448,20 @@ local function handle_chunk(input, buffer)
                     local final = input:sub(j, j)
                     local params = input:sub(i + 2, j - 1)
                     if final == 'm' then
-                        -- SGR - styling change
+                        -- SGR - styling change. Merge sequential SGR codes into a single state
                         if current_hl and hl_start then
                             table.insert(highlights, { hl = current_hl, start = hl_start, stop = pos })
                         end
                         local code = params or ''
-                        current_hl = (code == '' or code == '0') and nil or get_ansi_highlight(code)
-                        hl_start = current_hl and pos or nil
+                        if code == '' or code == '0' then
+                            current_state = nil
+                            current_hl = nil
+                            hl_start = nil
+                        else
+                            current_state = parse_sgr_parts(code, current_state)
+                            current_hl = get_ansi_highlight(current_state)
+                            hl_start = current_hl and pos or nil
+                        end
                     elseif final == 'K' then
                         -- EL (Erase in Line) handling
                         local n = tonumber(params) or 0
@@ -568,8 +586,8 @@ local function handle_chunk(input, buffer)
     -- Search for file:line patterns and set navigation marks
     search_locations(final_line, line_num)
 
-    -- Save ANSI state back
-    current_ansi_state = current_hl
+    -- Save ANSI state back (store state table)
+    current_ansi_state = current_state
 end
 
 
@@ -807,6 +825,7 @@ run_command = function(cmd)
     navigation_marks = {}
     -- Reset buffer content and ANSI state for new command
     utils.reset_buffer_content(buffer)
+    current_ansi_state = nil
     current_line_position = 1
     -- Initially populate buffer with command info
     update_output({ '@ ' .. vim.fn.getcwd(), '$ ' .. cmd, '', ''})
