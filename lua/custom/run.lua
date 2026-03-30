@@ -156,6 +156,7 @@ local ansi_namespace = nil
 local current_ansi_state = nil  -- Tracks ANSI state across lines
 local current_line_position = 1
 local navigation_marks = {}  -- Maps line numbers to file locations
+local ansi_hl_cache = {}
 
 -- Cheap OS detection: package.config first char is path separator ('\\' on Windows)
 local is_windows = package.config:sub(1,1) == '\\'
@@ -231,30 +232,113 @@ end
 
 --- Map ANSI color codes to highlight groups
 local function get_ansi_highlight(code)
-    local colors = {['31']='Red',         ['32']='Green',     ['33']='Yellow',     ['34']='Blue',
-                    ['35']='Magenta',     ['36']='Cyan',      ['37']='White',
-                    ['91']='BoldRed',     ['92']='BoldGreen', ['93']='BoldYellow', ['94']='BoldBlue',
-                    ['95']='BoldMagenta', ['96']='BoldCyan',  ['97']='BoldWhite'}
+    -- Extended ANSI handling: supports standard, 256-color (38;5;n / 48;5;n)
+    -- and truecolor (38;2;r;g;b / 48;2;r;g;b). Generates dynamic highlight
+    -- groups and caches them.
 
-    if not code:find(';') then
-        return colors[code] and 'Ansi' .. colors[code]
-    end
+    local function clamp(v, a, b) v = tonumber(v) or 0 if v < a then return a end if v > b then return b end return v end
 
-    -- Parse combined codes
-    local parts = vim.split(code, ';')
-    local style, color = '', nil
-    for _, p in ipairs(parts) do
-        if p == '1' then style = 'Bold'
-        elseif p == '3' then style = 'Italic'
-        elseif p == '4' then style = 'Underline'
-        elseif p == '9' then style = 'Strike'
-        elseif colors[p] then color = p
+    local function xterm256_to_hex(n)
+        n = tonumber(n) or 0
+        if n < 0 then n = 0 end
+        if n > 255 then n = 255 end
+        -- 0-15: system colors
+        local ansi16 = {
+            {0,0,0},{128,0,0},{0,128,0},{128,128,0},{0,0,128},{128,0,128},{0,128,128},{192,192,192},
+            {128,128,128},{255,0,0},{0,255,0},{255,255,0},{0,0,255},{255,0,255},{0,255,255},{255,255,255}
+        }
+        if n < 16 then
+            local c = ansi16[n+1]
+            return string.format('#%02x%02x%02x', c[1], c[2], c[3])
+        elseif n >= 16 and n <= 231 then
+            local v = n - 16
+            local r = math.floor(v / 36)
+            local g = math.floor((v % 36) / 6)
+            local b = v % 6
+            local function level(x) return x == 0 and 0 or 55 + x * 40 end
+            return string.format('#%02x%02x%02x', level(r), level(g), level(b))
+        else
+            -- grayscale 232..255
+            local gray = 8 + (n - 232) * 10
+            return string.format('#%02x%02x%02x', gray, gray, gray)
         end
     end
 
-    if color then return 'Ansi' .. style .. colors[color]
-    elseif style ~= '' then return 'Ansi' .. style
+    local parts = vim.split(code or '', ';')
+    if #parts == 0 or ( #parts == 1 and (parts[1] == '' or parts[1] == '0') ) then
+        return nil
     end
+
+    local fg, bg = nil, nil
+    local attrs = { bold = false, italic = false, underline = false, strikethrough = false }
+    local i = 1
+    while i <= #parts do
+        local p = parts[i]
+        if p == '1' then attrs.bold = true
+        elseif p == '3' then attrs.italic = true
+        elseif p == '4' then attrs.underline = true
+        elseif p == '9' then attrs.strikethrough = true
+        elseif tonumber(p) and tonumber(p) >= 30 and tonumber(p) <= 37 then
+            local base = {['30']='#000000',['31']='#800000',['32']='#008000',['33']='#808000',['34']='#000080',['35']='#800080',['36']='#008080',['37']='#c0c0c0'}
+            fg = base[p]
+        elseif tonumber(p) and tonumber(p) >= 90 and tonumber(p) <= 97 then
+            local b2 = {['90']='#808080',['91']='#ff0000',['92']='#00ff00',['93']='#ffff00',['94']='#0000ff',['95']='#ff00ff',['96']='#00ffff',['97']='#ffffff'}
+            fg = b2[p]
+        elseif tonumber(p) and tonumber(p) >= 40 and tonumber(p) <= 47 then
+            local base_bg = {['40']='#000000',['41']='#800000',['42']='#008000',['43']='#808000',['44']='#000080',['45']='#800080',['46']='#008080',['47']='#c0c0c0'}
+            bg = base_bg[p]
+        elseif tonumber(p) and tonumber(p) >= 100 and tonumber(p) <= 107 then
+            local bg2 = {['100']='#808080',['101']='#ff0000',['102']='#00ff00',['103']='#ffff00',['104']='#0000ff',['105']='#ff00ff',['106']='#00ffff',['107']='#ffffff'}
+            bg = bg2[p]
+        elseif p == '38' or p == '48' then
+            -- extended color sequences
+            local is_fg = p == '38'
+            local mode = parts[i+1]
+            if mode == '5' then
+                local n = tonumber(parts[i+2]) or 0
+                local hex = xterm256_to_hex(n)
+                if is_fg then fg = hex else bg = hex end
+                i = i + 2
+            elseif mode == '2' then
+                local r = clamp(parts[i+2], 0, 255)
+                local g = clamp(parts[i+3], 0, 255)
+                local b = clamp(parts[i+4], 0, 255)
+                local hex = string.format('#%02x%02x%02x', r, g, b)
+                if is_fg then fg = hex else bg = hex end
+                i = i + 4
+            end
+        end
+        i = i + 1
+    end
+
+    if not fg and not bg and not (attrs.bold or attrs.italic or attrs.underline or attrs.strikethrough) then
+        return nil
+    end
+
+    local function sanitize(s)
+        return tostring(s):gsub('#','_'):gsub('%W','_')
+    end
+    local name_parts = { 'Ansi' }
+    if fg then table.insert(name_parts, 'fg' .. sanitize(fg)) end
+    if bg then table.insert(name_parts, 'bg' .. sanitize(bg)) end
+    if attrs.bold then table.insert(name_parts, 'Bold') end
+    if attrs.italic then table.insert(name_parts, 'Italic') end
+    if attrs.underline then table.insert(name_parts, 'Underline') end
+    if attrs.strikethrough then table.insert(name_parts, 'Strike') end
+    local hl_name = table.concat(name_parts, '_')
+
+    if not ansi_hl_cache[hl_name] then
+        local props = {}
+        if fg then props.fg = fg end
+        if bg then props.bg = bg end
+        if attrs.bold then props.bold = true end
+        if attrs.italic then props.italic = true end
+        if attrs.underline then props.underline = true end
+        if attrs.strikethrough then props.strikethrough = true end
+        pcall(vim.api.nvim_set_hl, 0, hl_name, props)
+        ansi_hl_cache[hl_name] = true
+    end
+    return hl_name
 end
 
 
@@ -294,8 +378,16 @@ local function search_locations(line, line_num)
             }
             -- Highlight the file:line[:col] pattern (0-based column indexing)
             local buffer = utils.find_buffer_by_name(BUFFER_NAME)
-            vim.api.nvim_buf_set_extmark(buffer, ns_id, line_num, s - 1, {
-                end_col = e,
+            -- Clamp extmark columns to the actual line length to avoid nvim errors
+            local line_text = line or ''
+            local line_len = #line_text
+            local start_col = math.max(0, s - 1)
+            local end_col = math.min(line_len, e)
+            if end_col <= start_col then
+                end_col = math.min(line_len, start_col + 1)
+            end
+            pcall(vim.api.nvim_buf_set_extmark, buffer, ns_id, line_num, start_col, {
+                end_col = end_col,
                 hl_group = 'Directory',
             })
         end
@@ -459,10 +551,17 @@ local function handle_chunk(input, buffer)
     local line_num = utils.get_buffer_line_count(buffer) - 1
     for _, hl in ipairs(highlights) do
         if hl.stop > hl.start then
-            vim.api.nvim_buf_set_extmark(buffer, ns_id, line_num, hl.start, {
-                end_col = hl.stop,
-                hl_group = hl.hl,
-            })
+            -- Clamp highlight extmarks to current line length to avoid out-of-range errors
+            local line_text = final_line or ''
+            local line_len = #line_text
+            local s_col = math.max(0, hl.start)
+            local e_col = math.min(line_len, hl.stop)
+            if e_col > s_col then
+                pcall(vim.api.nvim_buf_set_extmark, buffer, ns_id, line_num, s_col, {
+                    end_col = e_col,
+                    hl_group = hl.hl,
+                })
+            end
         end
     end
 
