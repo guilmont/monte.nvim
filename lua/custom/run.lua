@@ -159,7 +159,7 @@ local navigation_marks = {}  -- Maps line numbers to file locations
 local ansi_hl_cache = {}
 
 -- Cheap OS detection: package.config first char is path separator ('\\' on Windows)
-local is_windows = package.config:sub(1,1) == '\\'
+local is_windows = vim.fn.has("win32") == 1 or vim.fn.has("win64") == 1
 
 --- Ensure extmark namespace exists even after module reloads
 local function ensure_ansi_namespace()
@@ -838,9 +838,10 @@ run_command = function(cmd)
     update_output({ '@ ' .. vim.fn.getcwd(), '$ ' .. cmd, '', ''})
     -- Start async job
     local job_opts = {
-        -- Allocate a PTY so tools think they're in a real terminal
-        -- and emit ANSI colors (helps Cargo, npm, etc.)
-        pty = true,
+        -- Using tty mode on windows to avoid compatibility issues
+        tty = is_windows,
+        -- Using pty on non-windows systems so tools think they're in a real terminal
+        pty = not is_windows,
         on_stdout = function(_, data)
             if this_run ~= run_sequence then return end
             update_output(data)
