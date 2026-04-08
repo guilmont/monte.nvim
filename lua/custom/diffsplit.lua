@@ -60,6 +60,12 @@ function M.open_file_diffsplit(args)
                 utils.set_current_window(right_win)
             end)
         end
+        -- Remove diff-only keymaps from the real file buffer
+        if vim.api.nvim_buf_is_valid(right_buf) then
+            for _, key in ipairs({ 'q', 'Q', 'r', '[', ']' }) do
+                pcall(vim.keymap.del, 'n', key, { buffer = right_buf })
+            end
+        end
     end
 
     local function close_both()
@@ -81,6 +87,12 @@ function M.open_file_diffsplit(args)
             else
                 utils.dismiss_buffer_window(right_win, right_buf)
                 return
+            end
+        end
+        -- Remove diff-only keymaps from the real file buffer
+        if vim.api.nvim_buf_is_valid(right_buf) then
+            for _, key in ipairs({ 'q', 'Q', 'r', '[', ']' }) do
+                pcall(vim.keymap.del, 'n', key, { buffer = right_buf })
             end
         end
         pcall(utils.remove_buffer, right_buf)
