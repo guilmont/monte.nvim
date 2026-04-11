@@ -403,8 +403,8 @@ local function edit_changelist_description(cn)
         '# Perforce Editor',
         '#',
         '# Edit the changelist below. When done:',
-        '#   :w   - Save changes to Perforce',
-        '#   :bd!  - Cancel without saving',
+        '#   w - Save changes to Perforce',
+        '#   q - Discard and go back',
         '#',
     }
 
@@ -417,14 +417,14 @@ local function edit_changelist_description(cn)
         table.insert(buffer_content, line)
     end
 
-    -- Create a buffer for editing
-    local buf = vim.api.nvim_create_buf(false, false)
-    vim.bo[buf].bufhidden = 'wipe'
-    vim.bo[buf].swapfile = false
+    -- Scratch buffer: unlisted, not a file, no swapfile
+    local buf = utils.create_scratch_buffer('P4-Change-' .. cn, true)
     vim.bo[buf].filetype = 'conf'
-    vim.api.nvim_buf_set_name(buf, 'P4-Change-' .. cn)
     vim.api.nvim_buf_set_lines(buf, 0, -1, false, buffer_content)
-    vim.api.nvim_set_current_buf(buf)
+
+    -- Remember the window, then show the edit buffer
+    local edit_win = vim.api.nvim_get_current_win()
+    utils.set_window_buffer(edit_win, buf)
 
     -- Apply syntax highlighting
     local ns_id = vim.api.nvim_create_namespace('P4ChangeSpec')
@@ -443,47 +443,41 @@ local function edit_changelist_description(cn)
         end
     end
 
-    -- On save, submit the change
-    vim.api.nvim_create_autocmd('BufWriteCmd', {
-        buffer = buf,
-        callback = function()
-            -- Get buffer contents and filter out documentation comments
-            local all_lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
-            local spec_lines = {}
-            for _, line in ipairs(all_lines) do
-                -- Skip comment lines and separator
-                if not line:match('^#') and not line:match('^%-%-%-$') then
-                    table.insert(spec_lines, line)
-                end
+    -- Close the edit buffer and return to the Perforce window
+    local function close_edit_buffer()
+        utils.dismiss_buffer_window(edit_win, buf)
+        show_window()
+    end
+
+    -- w: save changes to Perforce, then close
+    local opts = { buffer = buf, nowait = true, noremap = true, silent = true }
+    vim.keymap.set('n', 'w', function()
+        -- Get buffer contents and filter out documentation comments
+        local all_lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
+        local spec_lines = {}
+        for _, line in ipairs(all_lines) do
+            if not line:match('^#') and not line:match('^%-%-%-$') then
+                table.insert(spec_lines, line)
             end
+        end
 
-            -- Write to temp file and submit
-            local tmpname = vim.fn.tempname()
-            vim.fn.writefile(spec_lines, tmpname)
+        -- Write to temp file and submit
+        local tmpname = vim.fn.tempname()
+        vim.fn.writefile(spec_lines, tmpname)
 
-            local result = vim.fn.systemlist('p4 change -i < ' .. vim.fn.shellescape(tmpname))
-            os.remove(tmpname)
+        local result = vim.fn.systemlist('p4 change -i < ' .. vim.fn.shellescape(tmpname))
+        os.remove(tmpname)
 
-            if vim.v.shell_error ~= 0 then
-                vim.notify('Failed to update: ' .. table.concat(result, '\n'), vim.log.levels.ERROR)
-            else
-                vim.notify('Changelist updated', vim.log.levels.INFO)
-                vim.schedule(function()
-                    pcall(vim.api.nvim_buf_delete, buf, { force = true })
-                    show_window()
-                end)
-            end
-        end,
-    })
+        if vim.v.shell_error ~= 0 then
+            vim.notify('Failed to update: ' .. table.concat(result, '\n'), vim.log.levels.ERROR)
+        else
+            vim.notify('Changelist updated', vim.log.levels.INFO)
+            close_edit_buffer()
+        end
+    end, opts)
 
-    -- On close without save, just refresh the P4 window
-    vim.api.nvim_create_autocmd('BufWipeout', {
-        buffer = buf,
-        once = true,
-        callback = function()
-            vim.schedule(show_window)
-        end,
-    })
+    -- q: discard and go back
+    vim.keymap.set('n', 'q', close_edit_buffer, opts)
 end
 
 --- Cursor based action handler
