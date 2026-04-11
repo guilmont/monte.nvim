@@ -422,18 +422,25 @@ show_window = function()
         buffer = initialize_buffer()
     end
 
+    -- Take over as main window
+    local target_win = utils.close_other_windows()
+
     local changes = get_git_changes(root)
     GIT_CHANGES = changes
 
     local lines = setup_display_lines(root)
 
-    local win = utils.reuse_or_create_window_for_buffer(buffer)
+    if target_win and utils.is_window_valid(target_win) then
+        vim.api.nvim_win_set_buf(target_win, buffer)
+    else
+        target_win = utils.reuse_or_create_window_for_buffer(buffer)
+    end
     utils.set_buffer_lines(buffer, 0, -1, lines)
     apply_syntax_highlighting(buffer)
 
-    utils.set_current_window(win)
+    utils.set_current_window(target_win)
     if saved_cursor_pos then
-        pcall(utils.set_cursor_position, win, saved_cursor_pos.line, saved_cursor_pos.col)
+        pcall(utils.set_cursor_position, target_win, saved_cursor_pos.line, saved_cursor_pos.col)
     end
 end
 

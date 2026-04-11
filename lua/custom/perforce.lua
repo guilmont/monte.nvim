@@ -87,6 +87,51 @@ local function batch_depot_to_local(depot_paths)
     return mapping
 end
 
+-- Batch check file revision status using a single `p4 -ztag fstat` call.
+-- Returns a table mapping depot_path -> { have_rev, head_rev, unresolved }
+local function batch_check_file_status(depot_paths)
+    if not depot_paths or #depot_paths == 0 then return {} end
+
+    local cmd = 'p4 -ztag fstat'
+    for _, depot_path in ipairs(depot_paths) do
+        cmd = cmd .. ' ' .. url_encode(vim.fn.shellescape(depot_path))
+    end
+
+    local ok, result = pcall(vim.fn.systemlist, cmd)
+    if not ok or vim.v.shell_error ~= 0 then return {} end
+
+    local status_map = {}
+    local current_depot
+    local current_status = {}
+
+    for _, line in ipairs(result) do
+        line = url_decode(line)
+        local depot = line:match('^%.%.%. depotFile%s+(.+)$')
+        if depot then
+            -- Save previous entry
+            if current_depot then
+                status_map[current_depot] = current_status
+            end
+            current_depot = depot
+            current_status = {}
+        else
+            local have = line:match('^%.%.%. haveRev%s+(%d+)$')
+            if have then current_status.have_rev = tonumber(have) end
+
+            local head = line:match('^%.%.%. headRev%s+(%d+)$')
+            if head then current_status.head_rev = tonumber(head) end
+
+            if line:match('^%.%.%. unresolved') then current_status.unresolved = true end
+        end
+    end
+    -- Save last entry
+    if current_depot then
+        status_map[current_depot] = current_status
+    end
+
+    return status_map
+end
+
 
 local function p4_edit()
     local file = vim.fn.expand('%:p')
@@ -337,14 +382,24 @@ local function get_client_changelists(client_info)
     -- Batch resolve all depot paths to local paths in one p4 call
     local path_mapping = batch_depot_to_local(depot_paths)
 
-    -- Second pass: add files with resolved local paths to changelists
+    -- Batch check revision status for all opened files
+    local status_mapping = batch_check_file_status(depot_paths)
+
+    -- Second pass: add files with resolved local paths and revision status to changelists
     for _, file_data in ipairs(files_data) do
         local local_path = path_mapping[file_data.depot_path] or ''
+        local status = status_mapping[file_data.depot_path] or {}
+        local have_rev = status.have_rev
+        local head_rev = status.head_rev
         table.insert(file_map[file_data.change_number].opened_files, {
             depot_path = file_data.depot_path,
             action = file_data.action,
             local_path = local_path,
             relative_path = local_path:sub(#client_info.root + 2),
+            have_rev = have_rev,
+            head_rev = head_rev,
+            outdated = have_rev and head_rev and head_rev > have_rev,
+            unresolved = status.unresolved,
         })
     end
 
@@ -379,10 +434,15 @@ local function get_perforce_window()
     error('No valid Perforce window for action')
 end
 
--- Return line number in which cursor is on perforce window
-local function get_action_line()
+-- Return the INDEX_MAP entry for the line under the cursor
+local function get_action_data()
     local win = get_perforce_window()
-    return utils.get_cursor_position(win).line
+    local line = utils.get_cursor_position(win).line
+    local data = INDEX_MAP[line]
+    if not data then
+        error('No action data found for line ' .. line)
+    end
+    return data
 end
 
 --- Edit the description of a changelist
@@ -482,13 +542,7 @@ end
 
 --- Cursor based action handler
 local function input_action()
-    -- Get action data for current line
-    local line = get_action_line()
-    local data = INDEX_MAP[line]
-    -- Just in case
-    if not data then
-        error('No action data found for line ' .. line)
-    end
+    local data = get_action_data()
 
     -- Toggle shelf expansion
     if data.type == 'shelf_toggle' then
@@ -507,12 +561,7 @@ local function input_action()
 end
 
 local function shelve_files()
-    -- Get action data for current line
-    local line = get_action_line()
-    local data = INDEX_MAP[line]
-    if not data then
-        error('No action data found for line ' .. line)
-    end
+    local data = get_action_data()
 
     -- Shelve single file
     if data.type == 'opened_file' then
@@ -536,37 +585,42 @@ local function shelve_files()
     end
 end
 
-local function unshelve_files()
-    -- Get action data for current line
-    local line = get_action_line()
-    local data = INDEX_MAP[line]
-    if not data then
-        error('No action data found for line ' .. line)
+local function notify_unresolved(depot_paths)
+    local status = batch_check_file_status(depot_paths)
+    local count = 0
+    for _, st in pairs(status) do
+        if st.unresolved then count = count + 1 end
     end
+    if count > 0 then
+        vim.notify(string.format('P4: %d file%s need resolve (press R)', count, count ~= 1 and 's' or ''), vim.log.levels.WARN)
+    end
+end
 
-    -- Unshelve single file
+local function unshelve_files()
+    local data = get_action_data()
+
     if data.type == 'shelved_file' then
         local cn = data.change_number
         local depot_path = data.shelved_file
         p4_cmd({cmd = 'unshelve -s ' .. cn .. ' -c ' .. cn .. ' ', filepath = depot_path})
-        vim.cmd('checktime') -- Refresh file in editor if open
+        vim.cmd('checktime')
+        notify_unresolved({depot_path})
         show_window()
-    -- Unshelve entire changelist
     elseif data.type == 'shelf_toggle' then
         local cn = data.change_number
         p4_cmd({cmd = 'unshelve -s ' .. cn .. ' -c ' .. cn})
-        vim.cmd('checktime') -- Refresh files in editor if open
+        vim.cmd('checktime')
+        local depot_paths = {}
+        for _, file in ipairs(CHANGELISTS[cn].opened_files) do
+            table.insert(depot_paths, file.depot_path)
+        end
+        notify_unresolved(depot_paths)
         show_window()
     end
 end
 
 local function revert_files()
-    -- Get action data for current line
-    local line = get_action_line()
-    local data = INDEX_MAP[line]
-    if not data then
-        error('No action data found for line ' .. line)
-    end
+    local data = get_action_data()
 
     -- Revert single file
     if data.type == 'opened_file' then
@@ -596,12 +650,7 @@ local function revert_files()
 end
 
 local function move_files()
-    -- Get action data for current line
-    local line = get_action_line()
-    local data = INDEX_MAP[line]
-    if not data then
-        error('No action data found for line ' .. line)
-    end
+    local data = get_action_data()
 
     if data.type == 'opened_file' or data.type == 'files_header' then
         local cl_options = {}
@@ -637,12 +686,7 @@ local function move_files()
 end
 
 local function delete_stuff()
-    -- Get action data for current line
-    local line = get_action_line()
-    local data = INDEX_MAP[line]
-    if not data then
-        error('No action data found for line ' .. line)
-    end
+    local data = get_action_data()
 
     -- Nothing can be done in default changelist
     if data.change_number == 'default' then
@@ -705,16 +749,209 @@ local function delete_stuff()
 end
 
 local function show_diff()
-    -- Get action data for current line
-    local line = get_action_line()
-    local data = INDEX_MAP[line]
-    if not data then
-        error('No action data found for line ' .. line)
-    end
+    local data = get_action_data()
 
     if data.type == 'opened_file' then
         vim.schedule(function() p4_vdiffsplit(data.opened_file.local_path) end)
     end
+end
+
+local function sync_files()
+    local data = get_action_data()
+
+    if data.type == 'opened_file' then
+        local file = data.opened_file
+        p4_cmd({cmd = 'sync ', filepath = file.depot_path})
+        vim.cmd('checktime')
+        show_window()
+    elseif data.type == 'files_header' then
+        local cn = data.change_number
+        for _, file in ipairs(CHANGELISTS[cn].opened_files) do
+            p4_cmd({cmd = 'sync ', filepath = file.depot_path})
+        end
+        vim.cmd('checktime')
+        show_window()
+    end
+end
+
+local function resolve_files()
+    local data = get_action_data()
+
+    if data.type ~= 'opened_file' then return end
+
+    local file = data.opened_file
+
+    -- Try auto-merge first — if it works, no user decision needed
+    pcall(p4_cmd, {cmd = 'resolve -am ', filepath = file.depot_path})
+
+    -- Check if still unresolved (auto-merge failed or had conflicts)
+    local status = batch_check_file_status({file.depot_path})
+    local st = status[file.depot_path]
+    if not (st and st.unresolved) then
+        vim.notify('P4: Auto-merged ' .. file.relative_path, vim.log.levels.INFO)
+        vim.cmd('checktime')
+        show_window()
+        return
+    end
+
+    -- Conflicts remain — ask the user how to proceed
+    local resolve_options = {
+        'Merge with conflict markers (edit manually)',
+        'Accept theirs (discard your changes)',
+        'Accept yours (discard their changes)',
+    }
+
+    vim.ui.select(resolve_options, {
+        prompt = 'Auto-merge failed for ' .. file.relative_path .. ' — conflicts remain:',
+    }, function(choice)
+        if not choice then return end
+
+        if choice:match('^Accept theirs') then
+            p4_cmd({cmd = 'resolve -at ', filepath = file.depot_path})
+            vim.cmd('checktime')
+            show_window()
+        elseif choice:match('^Accept yours') then
+            p4_cmd({cmd = 'resolve -ay ', filepath = file.depot_path})
+            vim.cmd('checktime')
+            show_window()
+        elseif choice:match('^Merge') then
+            -- Get the merge source from resolve preview
+            local preview = vim.fn.systemlist(
+                'p4 resolve -n ' .. url_encode(vim.fn.shellescape(file.local_path))
+            )
+            local theirs_spec
+            for _, pline in ipairs(preview) do
+                local source = pline:match('merging (.+)$')
+                if source then theirs_spec = source; break end
+            end
+            if not theirs_spec then
+                vim.notify('P4: Could not determine merge source', vim.log.levels.ERROR)
+                return
+            end
+
+            -- Get the three versions for diff3:
+            --   yours = current file (local edits)
+            --   base  = depot file at have revision
+            --   theirs = incoming version (from unshelve/sync)
+            local tmp_theirs = vim.fn.tempname()
+            local tmp_base = vim.fn.tempname()
+            vim.fn.systemlist('p4 print -q -o ' .. vim.fn.shellescape(tmp_theirs) .. ' ' .. vim.fn.shellescape(theirs_spec))
+            vim.fn.systemlist('p4 print -q -o ' .. vim.fn.shellescape(tmp_base) .. ' ' .. url_encode(vim.fn.shellescape(file.depot_path)) .. '#' .. (file.have_rev or 1))
+
+            -- Run diff3 to produce merged content with conflict markers
+            local merged = vim.fn.systemlist(string.format(
+                'diff3 -m --label LOCAL %s --label ORIGINAL %s --label INCOMING %s',
+                vim.fn.shellescape(file.local_path),
+                vim.fn.shellescape(tmp_base),
+                vim.fn.shellescape(tmp_theirs)
+            ))
+            os.remove(tmp_theirs)
+            os.remove(tmp_base)
+
+            -- Open the file and replace content with merged result (don't save yet)
+            vim.cmd('edit ' .. vim.fn.fnameescape(file.local_path))
+            local buf = vim.api.nvim_get_current_buf()
+            vim.api.nvim_buf_set_lines(buf, 0, -1, false, merged)
+
+            -- Highlight conflict markers
+            local ns = vim.api.nvim_create_namespace('P4ConflictMarkers')
+            local function apply_conflict_highlights()
+                vim.api.nvim_buf_clear_namespace(buf, ns, 0, -1)
+                local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
+                local section
+                for i, l in ipairs(lines) do
+                    local li = i - 1
+                    if l:match('^<<<<<<< LOCAL') then
+                        vim.api.nvim_buf_add_highlight(buf, ns, 'DiagnosticInfo', li, 0, #l)
+                        section = 'local'
+                    elseif l:match('^||||||| ORIGINAL') then
+                        vim.api.nvim_buf_add_highlight(buf, ns, 'DiagnosticError', li, 0, #l)
+                        section = 'original'
+                    elseif l:match('^=======') then
+                        vim.api.nvim_buf_add_highlight(buf, ns, 'DiagnosticWarn', li, 0, #l)
+                        section = 'incoming'
+                    elseif l:match('^>>>>>>> INCOMING') then
+                        vim.api.nvim_buf_add_highlight(buf, ns, 'DiagnosticWarn', li, 0, #l)
+                        section = nil
+                    elseif section == 'local' then
+                        vim.api.nvim_buf_add_highlight(buf, ns, 'DiffAdd', li, 0, #l)
+                    elseif section == 'original' then
+                        vim.api.nvim_buf_add_highlight(buf, ns, 'DiffDelete', li, 0, #l)
+                    elseif section == 'incoming' then
+                        vim.api.nvim_buf_add_highlight(buf, ns, 'DiffChange', li, 0, #l)
+                    end
+                end
+            end
+            apply_conflict_highlights()
+
+            local function cleanup_resolve_keymaps()
+                for _, key in ipairs({ ']', '[', 'q', '<Esc>' }) do
+                    pcall(vim.keymap.del, 'n', key, { buffer = buf })
+                end
+            end
+
+            -- Re-apply highlights when buffer changes
+            vim.api.nvim_create_autocmd({'TextChanged', 'TextChangedI'}, {
+                buffer = buf,
+                callback = function()
+                    local content = table.concat(vim.api.nvim_buf_get_lines(buf, 0, -1, false), '\n')
+                    if not content:match('<<<<<<< LOCAL') then
+                        vim.api.nvim_buf_clear_namespace(buf, ns, 0, -1)
+                        -- All conflicts resolved — auto-save, press q to accept and return
+                        vim.cmd('write')
+                        vim.notify('P4: All conflicts resolved — press q to accept and return', vim.log.levels.INFO)
+                        return true
+                    end
+                    apply_conflict_highlights()
+                end,
+            })
+
+            -- [ and ] to jump between conflict sections
+            local map_opts = { buffer = buf, nowait = true, noremap = true, silent = true }
+            vim.keymap.set('n', ']', function()
+                vim.fn.search('<<<<<<< LOCAL', 'W')
+            end, map_opts)
+            vim.keymap.set('n', '[', function()
+                vim.fn.search('<<<<<<< LOCAL', 'bW')
+            end, map_opts)
+
+            -- q: save and accept resolve (when all markers gone)
+            vim.keymap.set('n', 'q', function()
+                local content = table.concat(vim.api.nvim_buf_get_lines(buf, 0, -1, false), '\n')
+                if content:match('<<<<<<< LOCAL') then
+                    vim.notify('P4: Conflict markers still present — resolve all conflicts first', vim.log.levels.WARN)
+                    return
+                end
+                cleanup_resolve_keymaps()
+                vim.api.nvim_buf_clear_namespace(buf, ns, 0, -1)
+                vim.cmd('write')
+                p4_cmd({cmd = 'resolve -ay ', filepath = file.depot_path})
+                vim.schedule(show_window)
+            end, map_opts)
+
+            -- Esc: cancel — reload original file, nothing changes in p4
+            vim.keymap.set('n', '<Esc>', function()
+                cleanup_resolve_keymaps()
+                vim.api.nvim_buf_clear_namespace(buf, ns, 0, -1)
+                vim.cmd('edit!')
+                vim.schedule(show_window)
+            end, map_opts)
+
+            -- Display instructions at the top
+            local help_lines = {
+                '# P4 Resolve — delete marker lines and unwanted code, keep what you need',
+                '# [ / ] jump conflicts | q save and return | Esc cancel',
+                '',
+            }
+            vim.api.nvim_buf_set_lines(buf, 0, 0, false, help_lines)
+            vim.api.nvim_buf_add_highlight(buf, ns, 'Comment', 0, 0, #help_lines[1])
+            vim.api.nvim_buf_add_highlight(buf, ns, 'Comment', 1, 0, #help_lines[2])
+
+            -- Jump to first conflict
+            vim.fn.cursor(1, 1)
+            vim.fn.search('<<<<<<< LOCAL', 'W')
+        end
+    end)
 end
 
 -- ===========================================================================
@@ -738,6 +975,8 @@ local function initialize_buffer()
     vim.keymap.set('n', 'u', unshelve_files, opts)
     vim.keymap.set('n', 'D', delete_stuff, opts)
     vim.keymap.set('n', 'd', show_diff, opts)
+    vim.keymap.set('n', 'S', sync_files, opts)
+    vim.keymap.set('n', 'R', resolve_files, opts)
 
     return buf
 end
@@ -788,7 +1027,13 @@ local function setup_display_lines()
             table.insert(lines, string.format('  Files%s', count_str))
             table.insert(INDEX_MAP, { type = 'files_header', change_number = cn })
             for _, file in ipairs(content.opened_files) do
-                table.insert(lines, string.format('    %-13s %s', file.action, file.relative_path))
+                local marker = '  '
+                if file.unresolved then
+                    marker = '✘ '
+                elseif file.outdated then
+                    marker = '↑ '
+                end
+                table.insert(lines, string.format('    %-13s %s%s', file.action, marker, file.relative_path))
                 table.insert(INDEX_MAP, { type = 'opened_file', change_number = cn, opened_file = file })
             end
         end
@@ -815,7 +1060,7 @@ local function setup_display_lines()
     end
 
     -- Help line
-    table.insert(lines, '[Enter=open/edit/toggle | d=diff | r=revert | m=move | s=shelve | u=unshelve | D=delete ]')
+    table.insert(lines, '[Enter=open/edit/toggle | d=diff | r=revert | m=move | s=shelve | u=unshelve | D=delete | S=sync | R=resolve]')
 
     return lines
 end
@@ -902,10 +1147,19 @@ local function apply_syntax_highlighting(buf)
 
                 vim.api.nvim_buf_add_highlight(buf, ns_id, hl_group, line_idx, 4, 4 + #action)
 
-                -- Highlight the filename
-                local file_start = line:find('[^%s]', 18)
-                if file_start then
-                    vim.api.nvim_buf_add_highlight(buf, ns_id, 'String', line_idx, file_start - 1, #line)
+                -- Check for status markers and highlight accordingly
+                local file_entry = INDEX_MAP[i] and INDEX_MAP[i].opened_file
+                if file_entry and file_entry.unresolved then
+                    -- Highlight marker '✘' (3 bytes at offset 18) and path in red
+                    vim.api.nvim_buf_add_highlight(buf, ns_id, 'DiagnosticError', line_idx, 18, 21)
+                    vim.api.nvim_buf_add_highlight(buf, ns_id, 'DiagnosticError', line_idx, 22, #line)
+                elseif file_entry and file_entry.outdated then
+                    -- Highlight marker '↑' (3 bytes at offset 18) and path in yellow
+                    vim.api.nvim_buf_add_highlight(buf, ns_id, 'WarningMsg', line_idx, 18, 21)
+                    vim.api.nvim_buf_add_highlight(buf, ns_id, 'WarningMsg', line_idx, 22, #line)
+                else
+                    -- Normal: path starts at offset 20 (after 2 spaces)
+                    vim.api.nvim_buf_add_highlight(buf, ns_id, 'String', line_idx, 20, #line)
                 end
             end
 
@@ -935,21 +1189,28 @@ show_window = function()
         buffer = initialize_buffer()
     end
 
+    -- Take over as main window
+    local target_win = utils.close_other_windows()
 
     -- Build lines and index map
     local info = get_client_info()
     CHANGELISTS = get_client_changelists(info)
     local lines = setup_display_lines()
 
-    local win = utils.reuse_or_create_window_for_buffer(buffer)
+    -- Show buffer in the single remaining window
+    if target_win and utils.is_window_valid(target_win) then
+        vim.api.nvim_win_set_buf(target_win, buffer)
+    else
+        target_win = utils.reuse_or_create_window_for_buffer(buffer)
+    end
     utils.set_buffer_lines(buffer, 0, -1, lines)
     apply_syntax_highlighting(buffer)
 
     -- Focus on the perforce window
-    utils.set_current_window(win)
+    utils.set_current_window(target_win)
     -- Restore cursor position if we had one saved
     if saved_cursor_pos then
-        pcall(utils.set_cursor_position, win, saved_cursor_pos.line, saved_cursor_pos.col)
+        pcall(utils.set_cursor_position, target_win, saved_cursor_pos.line, saved_cursor_pos.col)
     end
 end
 

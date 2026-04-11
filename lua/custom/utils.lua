@@ -241,6 +241,24 @@ function M.is_window_valid(winid)
     return vim.api.nvim_win_is_valid(winid)
 end
 
+-- Close all windows except Neo-tree.
+-- Returns one surviving real window to reuse, or nil.
+function M.close_other_windows()
+    local target_win
+    for _, winid in ipairs(vim.api.nvim_list_wins()) do
+        if M.is_window_valid(winid) then
+            if is_neotree_window(winid) then
+                -- keep
+            elseif not target_win and not is_floating_window(winid) then
+                target_win = winid
+            else
+                vim.api.nvim_win_close(winid, true)
+            end
+        end
+    end
+    return target_win
+end
+
 -- Reuse or create a window to given buffer.
 function M.reuse_or_create_window_for_buffer(bufnr)
     local winid = M.find_window_by_buffer(bufnr)
