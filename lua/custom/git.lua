@@ -47,7 +47,7 @@ local function get_git_root(path)
     if not out or not out[1] or out[1] == '' then
         error('Could not determine git repository root')
     end
-    return out[1]
+    return vim.fn.resolve(out[1])
 end
 
 local function current_git_root()
@@ -70,6 +70,7 @@ local function file_exists_in_head(root, relpath)
 end
 
 local function git_vdiffsplit(file)
+    file = vim.fn.resolve(file)
     local root = get_git_root(file)
     local relpath = relative_to_root(root, file)
 
