@@ -61,14 +61,6 @@ local function relative_to_root(root, file)
     return vim.fn.fnamemodify(file, ':t')
 end
 
-local function file_exists_in_head(root, relpath)
-    local ok = pcall(git_cmd, {
-        cwd = root,
-        cmd = 'cat-file -e ' .. vim.fn.shellescape('HEAD:' .. relpath),
-    })
-    return ok
-end
-
 local function git_vdiffsplit(file)
     file = vim.fn.resolve(file)
     local root = get_git_root(file)
@@ -77,8 +69,13 @@ local function git_vdiffsplit(file)
     local base_content = {}
     local left_name = 'Git HEAD (empty)'
 
-    if file_exists_in_head(root, relpath) then
-        base_content = git_cmd({ cwd = root, cmd = 'cat-file -p ' .. vim.fn.shellescape('HEAD:' .. relpath) })
+    local ok, result = pcall(git_cmd, {
+        cwd = vim.fn.fnamemodify(file, ':h'),
+        cmd = 'show HEAD:./' .. vim.fn.shellescape(vim.fn.fnamemodify(file, ':t')),
+    })
+
+    if ok then
+        base_content = result
         left_name = 'Git HEAD:' .. relpath
     end
 
@@ -441,7 +438,7 @@ show_window = function()
 
     utils.set_current_window(target_win)
     if saved_cursor_pos then
-        pcall(utils.set_cursor_position, target_win, saved_cursor_pos.line, saved_cursor_pos.col)
+        pcall(utils.set_cursor_position, target_win, saved_cursor_pos.line, saved_cursor_pos.column)
     end
 end
 
