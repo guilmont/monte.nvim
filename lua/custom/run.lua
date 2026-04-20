@@ -274,6 +274,12 @@ local function parse_sgr_parts(params, state)
         elseif p == '3' then state.attrs.italic = true
         elseif p == '4' then state.attrs.underline = true
         elseif p == '9' then state.attrs.strikethrough = true
+        elseif p == '22' then state.attrs.bold = false
+        elseif p == '23' then state.attrs.italic = false
+        elseif p == '24' then state.attrs.underline = false
+        elseif p == '29' then state.attrs.strikethrough = false
+        elseif p == '39' then state.fg = nil
+        elseif p == '49' then state.bg = nil
         elseif tonumber(p) and tonumber(p) >= 30 and tonumber(p) <= 37 then
             local base = {['30']='#000000',['31']='#800000',['32']='#008000',['33']='#808000',['34']='#000080',['35']='#800080',['36']='#008080',['37']='#c0c0c0'}
             state.fg = base[p]
@@ -466,8 +472,9 @@ local function handle_chunk(input, buffer)
                         -- EL (Erase in Line) handling
                         local n = tonumber(params) or 0
                         if n == 0 then
-                            -- erase from cursor to end of line
-                            for idx = current_line_position, #out_bytes do out_bytes[idx] = nil end
+                            -- erase from cursor to end of line (truncate table)
+                            local erase_from = current_line_position
+                            for idx = #out_bytes, erase_from, -1 do out_bytes[idx] = nil end
                             pos = current_line_position - 1
                         elseif n == 1 then
                             -- erase from start to cursor: shift remaining to line start
@@ -504,6 +511,16 @@ local function handle_chunk(input, buffer)
                         --     current_line_position = 1
                         --     pos = 0
                         -- end
+                    elseif final == 'G' then
+                        -- CHA (Cursor Character Absolute): move cursor to column N
+                        local col = tonumber(params) or 1
+                        col = math.max(1, col)
+                        local needed = col - 1
+                        if #out_bytes < needed then
+                            for k = #out_bytes + 1, needed do out_bytes[k] = 32 end
+                        end
+                        current_line_position = col
+                        pos = current_line_position - 1
                     elseif final == 'H' or final == 'f' then
                         -- Cursor position: move to specified column (params = 'row;col' or 'row')
                         local row_str, col_str = params:match('(%d*);?(%d*)')
