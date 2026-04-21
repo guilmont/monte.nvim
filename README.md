@@ -1,6 +1,6 @@
 # monte.nvim
 
-A minimal Neovim setup with VS Code-like editing, solid LSP defaults, and custom workflows for Git, Perforce, and async command execution.
+A minimal Neovim setup with VS Code-like editing, solid LSP defaults, and custom workflows for Git, Perforce, async command execution, and column alignment.
 
 ## Features
 
@@ -12,6 +12,7 @@ A minimal Neovim setup with VS Code-like editing, solid LSP defaults, and custom
 - Custom Git review window with diff, stage toggle, commit, and `lazygit`
 - Custom Perforce changelist manager with shelving and depot diffs
 - Async `:Run` command runner with parsed output and jump-to-location support
+- Column alignment of visual selections by vim regexp via `:Align`
 - Carbonfox theme, mini.statusline, and trim-on-save whitespace cleanup
 
 ## Prerequisites
@@ -208,6 +209,14 @@ Completion is manual by design. `Tab` is reserved for Copilot.
 | `n` | `k` | Kill running command |
 | `n` | `q` | Close output window |
 
+### Alignment
+
+| Mode | Key | Action |
+|------|-----|--------|
+| - | `:'<,'>Align <pattern>` | Align selected lines by vim regexp |
+
+Aligns the first match of the pattern to the same column across all selected lines. Lines without a match are left untouched. Uses vim regexp syntax.
+
 ## Project structure
 
 ```text
@@ -220,6 +229,7 @@ Completion is manual by design. `Tab` is reserved for Copilot.
 │   │   ├── keymaps.lua
 │   │   └── options.lua
 │   ├── custom/
+│   │   ├── align.lua
 │   │   ├── diffsplit.lua
 │   │   ├── git.lua
 │   │   ├── perforce.lua

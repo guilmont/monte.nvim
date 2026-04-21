@@ -15,6 +15,7 @@ require('config.autocmds')
 require('custom.perforce')
 require('custom.git')
 require('custom.run')
+require('custom.align')
 
 -- Bootstrap lazy.nvim if not installed
 local lazypath = vim.fn.stdpath 'data' .. '/lazy/lazy.nvim'
