@@ -610,11 +610,7 @@ local function unshelve_files()
         local cn = data.change_number
         p4_cmd({cmd = 'unshelve -s ' .. cn .. ' -c ' .. cn})
         vim.cmd('checktime')
-        local depot_paths = {}
-        for _, file in ipairs(CHANGELISTS[cn].opened_files) do
-            table.insert(depot_paths, file.depot_path)
-        end
-        notify_unresolved(depot_paths)
+        notify_unresolved(CHANGELISTS[cn].shelved_files)
         show_window()
     end
 end
@@ -763,13 +759,17 @@ local function sync_files()
         local file = data.opened_file
         p4_cmd({cmd = 'sync ', filepath = file.depot_path})
         vim.cmd('checktime')
+        notify_unresolved({file.depot_path})
         show_window()
     elseif data.type == 'files_header' then
         local cn = data.change_number
+        local depot_paths = {}
         for _, file in ipairs(CHANGELISTS[cn].opened_files) do
             p4_cmd({cmd = 'sync ', filepath = file.depot_path})
+            table.insert(depot_paths, file.depot_path)
         end
         vim.cmd('checktime')
+        notify_unresolved(depot_paths)
         show_window()
     end
 end
@@ -815,28 +815,83 @@ local function resolve_files()
             vim.cmd('checktime')
             show_window()
         elseif choice:match('^Merge') then
-            -- Get the merge source from resolve preview
-            local preview = vim.fn.systemlist(
-                'p4 resolve -n ' .. url_encode(vim.fn.shellescape(file.local_path))
-            )
-            local theirs_spec
-            for _, pline in ipairs(preview) do
-                local source = pline:match('merging (.+)$')
-                if source then theirs_spec = source; break end
+            -- Use fstat to get the exact resolve versions p4 recorded.
+            -- After `p4 sync`, haveRev is already bumped to the new head, so
+            -- using file.have_rev as the base would be the same rev as theirs
+            -- and diff3 would mark every local line as a conflict.
+            -- fstat exposes (index N varies by resolve type):
+            --   resolveBaseFileN / resolveBaseRevN  → common ancestor (ORIGINAL)
+            --   resolveFromFileN / resolveEndFromRevN → incoming version (THEIRS)
+            local fstat_cmd = 'p4 -ztag fstat -Or ' .. url_encode(vim.fn.shellescape(file.local_path))
+            local fstat_out = vim.fn.systemlist(fstat_cmd)
+            if vim.v.shell_error ~= 0 then
+                vim.notify('P4: fstat -Or failed: ' .. table.concat(fstat_out, '\n'), vim.log.levels.ERROR)
+                return
             end
-            if not theirs_spec then
-                vim.notify('P4: Could not determine merge source', vim.log.levels.ERROR)
+            local base_file, base_rev, from_file, from_rev
+            local resolve_records = {}
+            for _, line in ipairs(fstat_out) do
+                line = url_decode(line)
+                local n, val
+                n, val = line:match('^%.%.%. resolveType(%d+)%s+(.+)$')
+                if n then resolve_records[n] = resolve_records[n] or {}; resolve_records[n].type = val end
+                n, val = line:match('^%.%.%. resolveBaseFile(%d+)%s+(.+)$')
+                if n then resolve_records[n] = resolve_records[n] or {}; resolve_records[n].base_file = val end
+                -- base_rev can be "none" when there is no common ancestor (e.g. new file)
+                n, val = line:match('^%.%.%. resolveBaseRev(%d+)%s+(.+)$')
+                if n then resolve_records[n] = resolve_records[n] or {}; resolve_records[n].base_rev = val end
+                n, val = line:match('^%.%.%. resolveFromFile(%d+)%s+(.+)$')
+                if n then resolve_records[n] = resolve_records[n] or {}; resolve_records[n].from_file = val end
+                n, val = line:match('^%.%.%. resolveEndFromRev(%d+)%s+(%d+)$')
+                if n then resolve_records[n] = resolve_records[n] or {}; resolve_records[n].from_rev = val end
+                -- Fallback: some resolve types only have resolveStartFromRev
+                n, val = line:match('^%.%.%. resolveStartFromRev(%d+)%s+(%d+)$')
+                if n then
+                    resolve_records[n] = resolve_records[n] or {}
+                    if not resolve_records[n].from_rev then resolve_records[n].from_rev = val end
+                end
+            end
+            -- Find the first content resolve record (skip filetype resolves)
+            for _, rec in pairs(resolve_records) do
+                if rec.type == 'content' and rec.base_file and rec.base_rev and rec.from_file and rec.from_rev then
+                    base_file = rec.base_file
+                    base_rev = rec.base_rev
+                    from_file = rec.from_file
+                    from_rev = rec.from_rev
+                    break
+                end
+            end
+            if not (base_file and base_rev and from_file and from_rev) then
+                -- Dump resolve-related fstat fields for debugging
+                local resolve_lines = {}
+                for _, line in ipairs(fstat_out) do
+                    local decoded = url_decode(line)
+                    if decoded:match('resolve') then
+                        table.insert(resolve_lines, decoded)
+                    end
+                end
+                local diag = #resolve_lines > 0
+                    and 'Resolve fields:\n' .. table.concat(resolve_lines, '\n')
+                    or 'No resolve fields found in fstat output'
+                vim.notify('P4: Could not get resolve versions from fstat.\n' .. diag, vim.log.levels.ERROR)
                 return
             end
 
             -- Get the three versions for diff3:
-            --   yours = current file (local edits)
-            --   base  = depot file at have revision
-            --   theirs = incoming version (from unshelve/sync)
+            --   yours  = current file on disk (your local edits)
+            --   base   = common ancestor (what you originally synced from)
+            --   theirs = incoming version (what was just synced/unshelved)
             local tmp_theirs = vim.fn.tempname()
-            local tmp_base = vim.fn.tempname()
-            vim.fn.systemlist('p4 print -q -o ' .. vim.fn.shellescape(tmp_theirs) .. ' ' .. vim.fn.shellescape(theirs_spec))
-            vim.fn.systemlist('p4 print -q -o ' .. vim.fn.shellescape(tmp_base) .. ' ' .. url_encode(vim.fn.shellescape(file.depot_path)) .. '#' .. (file.have_rev or 1))
+            local tmp_base   = vim.fn.tempname()
+            vim.fn.systemlist('p4 print -q -o ' .. vim.fn.shellescape(tmp_theirs)
+                .. ' ' .. url_encode(vim.fn.shellescape(from_file)) .. '#' .. from_rev)
+            if base_rev == 'none' then
+                -- No common ancestor (new file) — use empty base for diff3
+                vim.fn.writefile({}, tmp_base)
+            else
+                vim.fn.systemlist('p4 print -q -o ' .. vim.fn.shellescape(tmp_base)
+                    .. ' ' .. url_encode(vim.fn.shellescape(base_file)) .. '#' .. base_rev)
+            end
 
             -- Run diff3 to produce merged content with conflict markers
             local merged = vim.fn.systemlist(string.format(
@@ -937,15 +992,9 @@ local function resolve_files()
                 vim.schedule(show_window)
             end, map_opts)
 
-            -- Display instructions at the top
-            local help_lines = {
-                '# P4 Resolve — delete marker lines and unwanted code, keep what you need',
-                '# [ / ] jump conflicts | q save and return | Esc cancel',
-                '',
-            }
-            vim.api.nvim_buf_set_lines(buf, 0, 0, false, help_lines)
-            vim.api.nvim_buf_add_highlight(buf, ns, 'Comment', 0, 0, #help_lines[1])
-            vim.api.nvim_buf_add_highlight(buf, ns, 'Comment', 1, 0, #help_lines[2])
+            vim.schedule(function()
+                vim.notify('P4 Resolve: [ / ] jump conflicts | q save and return | Esc cancel', vim.log.levels.INFO)
+            end)
 
             -- Jump to first conflict
             vim.fn.cursor(1, 1)
