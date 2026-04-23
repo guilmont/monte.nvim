@@ -9,13 +9,19 @@ return {
   config = function()
     local telescope = require 'telescope'
     local builtin = require 'telescope.builtin'
+    local actions = require 'telescope.actions'
     telescope.setup({
+      defaults = {
+        mappings = {
+          n = { ['q'] = actions.send_to_qflist + actions.open_qflist },
+        },
+      },
       pickers = {
         buffers = {
           sort_lastused = true,
           ignore_current_buffer = true,
           mappings = {
-            i = { ['<C-d>'] = 'delete_buffer' },
+            n = { ['d'] = actions.delete_buffer },
           },
         },
       },
