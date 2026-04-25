@@ -521,6 +521,28 @@ local function edit_changelist_description(cn)
             end
         end
 
+        -- Re-encode special characters in depot paths (Files: section)
+        -- p4 change -o returns encoded paths (%40 for @, %23 for #) but
+        -- p4_cmd url_decodes everything.  We must re-encode before feeding
+        -- the spec back to p4 change -i.
+        local in_files = false
+        for idx, line in ipairs(spec_lines) do
+            if line:match('^Files:') then
+                in_files = true
+            elseif line:match('^%a') then
+                in_files = false
+            elseif in_files and line:match('^%s+//') then
+                -- Line format: "\t//depot/path\t# action"
+                -- Only encode the depot path, not the trailing "\t# action" suffix.
+                local leading, depot_path, suffix = line:match('^(%s+)(//.-)(%s+#.*)$')
+                if depot_path then
+                    spec_lines[idx] = leading .. url_encode(depot_path) .. suffix
+                else
+                    spec_lines[idx] = url_encode(line)
+                end
+            end
+        end
+
         -- Write to temp file and submit
         local tmpname = vim.fn.tempname()
         vim.fn.writefile(spec_lines, tmpname)
