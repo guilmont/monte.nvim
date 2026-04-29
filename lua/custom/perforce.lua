@@ -413,7 +413,7 @@ end
 
 -- Shared state and buffer naming
 local BUFFER_NAME = 'Perforce Window'
-local EXPAND_SHELF = false
+local EXPAND_SHELF = {}  -- per-changelist: EXPAND_SHELF[cn] = true/false
 local CHANGELISTS = {}
 local INDEX_MAP = {}
 
@@ -568,7 +568,8 @@ local function input_action()
 
     -- Toggle shelf expansion
     if data.type == 'shelf_toggle' then
-        EXPAND_SHELF = not EXPAND_SHELF
+        local cn = data.change_number
+        EXPAND_SHELF[cn] = not EXPAND_SHELF[cn]
         show_window()
 
     -- Open file in editor
@@ -630,7 +631,12 @@ local function unshelve_files()
         show_window()
     elseif data.type == 'shelf_toggle' then
         local cn = data.change_number
-        p4_cmd({cmd = 'unshelve -s ' .. cn .. ' -c ' .. cn})
+        -- Bulk unshelve may partially succeed with warnings (e.g. "also opened by",
+        -- "Can't clobber writable file").  Don't treat that as a fatal error.
+        local ok, err = pcall(p4_cmd, {cmd = 'unshelve -s ' .. cn .. ' -c ' .. cn})
+        if not ok then
+            vim.notify(err, vim.log.levels.WARN)
+        end
         vim.cmd('checktime')
         notify_unresolved(CHANGELISTS[cn].shelved_files)
         show_window()
@@ -1114,11 +1120,11 @@ local function setup_display_lines()
         if shelf_size > 0 then
             table.insert(lines, '')    -- Empty line before shelf
             table.insert(INDEX_MAP, { type = 'separator' })    -- Corresponding index_map entry
-            local expand_char = EXPAND_SHELF and '▼' or '▶'
+            local expand_char = EXPAND_SHELF[cn] and '▼' or '▶'
             table.insert(lines, string.format('  %s Shelf (%d file%s)', expand_char, shelf_size, shelf_size ~= 1 and 's' or ''))
             table.insert(INDEX_MAP, { type = 'shelf_toggle', change_number = cn })
             -- Shelved files (if expanded)
-            if EXPAND_SHELF then
+            if EXPAND_SHELF[cn] then
                 for _, depot_path in ipairs(content.shelved_files) do
                     table.insert(lines, string.format('    %s', depot_path))
                     table.insert(INDEX_MAP, { type = 'shelved_file', change_number = cn, shelved_file = depot_path })
