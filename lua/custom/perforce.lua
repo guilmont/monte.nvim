@@ -45,9 +45,9 @@ local function p4_cmd(args)
     if vim.v.shell_error ~= 0 then
         error('\nP4 error:\n ' .. table.concat(result, '\n '))
     end
-    -- Decode output lines
+    -- Strip CR (p4 server may return CRLF) and decode output lines
     for i, line in ipairs(result) do
-        result[i] = url_decode(line)
+        result[i] = url_decode(line:gsub('\r$', ''))
     end
     return result
 end
@@ -64,13 +64,15 @@ local function batch_depot_to_local(depot_paths)
     end
 
     local ok, result = pcall(vim.fn.systemlist, cmd)
-    if not ok or vim.v.shell_error ~= 0 then return {} end
+    if not ok then return {} end
 
-    -- Parse the tagged output
+    -- Parse the tagged output (don't check shell_error — p4 where returns
+    -- non-zero if any single path is unmapped, but still outputs valid
+    -- entries for the rest)
     local mapping = {}
     local current_depot, current_path
     for _, line in ipairs(result) do
-        line = url_decode(line)
+        line = url_decode(line:gsub('\r$', ''))
         local depot = line:match('^%.%.%. depotFile%s+(.+)$')
         if depot then
             current_depot = depot
@@ -98,14 +100,16 @@ local function batch_check_file_status(depot_paths)
     end
 
     local ok, result = pcall(vim.fn.systemlist, cmd)
-    if not ok or vim.v.shell_error ~= 0 then return {} end
+    if not ok then return {} end
 
+    -- Don't check shell_error — p4 fstat returns non-zero if any path
+    -- fails, but still outputs valid entries for the rest
     local status_map = {}
     local current_depot
     local current_status = {}
 
     for _, line in ipairs(result) do
-        line = url_decode(line)
+        line = url_decode(line:gsub('\r$', ''))
         local depot = line:match('^%.%.%. depotFile%s+(.+)$')
         if depot then
             -- Save previous entry
@@ -250,6 +254,11 @@ local function get_client_info()
         if client_name and client_root then break end
     end
 
+    -- Trim trailing slashes/backslashes from root (p4 may include them)
+    if client_root then
+        client_root = client_root:gsub('[/\\]+$', '')
+    end
+
     return {
         name = client_name or '',
         root = client_root or '',
@@ -387,7 +396,11 @@ local function get_client_changelists(client_info)
 
     -- Second pass: add files with resolved local paths and revision status to changelists
     for _, file_data in ipairs(files_data) do
-        local local_path = path_mapping[file_data.depot_path] or ''
+        local where_path = path_mapping[file_data.depot_path] or ''
+        -- p4 where may report a different drive letter than the actual client root
+        -- (e.g. subst'd drives). Reconstruct local_path using the real root.
+        local relative_path = where_path ~= '' and where_path:sub(#client_info.root + 2) or ''
+        local local_path = relative_path ~= '' and (client_info.root .. where_path:sub(#client_info.root + 1, #client_info.root + 1) .. relative_path) or ''
         local status = status_mapping[file_data.depot_path] or {}
         local have_rev = status.have_rev
         local head_rev = status.head_rev
@@ -395,7 +408,7 @@ local function get_client_changelists(client_info)
             depot_path = file_data.depot_path,
             action = file_data.action,
             local_path = local_path,
-            relative_path = local_path:sub(#client_info.root + 2),
+            relative_path = relative_path,
             have_rev = have_rev,
             head_rev = head_rev,
             outdated = have_rev and head_rev and head_rev > have_rev,
