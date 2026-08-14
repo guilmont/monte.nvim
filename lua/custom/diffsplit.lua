@@ -12,6 +12,15 @@ function M.open_file_diffsplit(args)
     local left_content = args.left_content or {}
     local left_name = args.left_name or 'Diff Base'
 
+    -- systemlist() splits on \n only, so blobs with CRLF line endings keep a
+    -- trailing \r on every line. The working buffer on the right renders per its
+    -- own 'fileformat' and never shows that \r, so the diff engine flags every
+    -- line as changed (blue DiffText) even though both sides look identical.
+    -- Strip the trailing \r so the comparison matches what the user sees.
+    for i, line in ipairs(left_content) do
+        left_content[i] = (line:gsub('\r$', ''))
+    end
+
     -- Capture whatever buffer was in the window before we possibly replace it via 'edit'
     -- so close_both can restore it (e.g. return to the git window) instead of closing nvim.
     local prev_buf = vim.api.nvim_win_get_buf(vim.api.nvim_get_current_win())

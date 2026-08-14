@@ -46,8 +46,9 @@ local function p4_cmd(args)
         error('\nP4 error:\n ' .. table.concat(result, '\n '))
     end
     -- Strip CR (p4 server may return CRLF) and decode output lines
+    -- (skip decoding for raw file content, e.g. `p4 print`)
     for i, line in ipairs(result) do
-        result[i] = url_decode(line:gsub('\r$', ''))
+        result[i] = args.raw and line:gsub('\r$', '') or url_decode(line:gsub('\r$', ''))
     end
     return result
 end
@@ -226,10 +227,10 @@ local function p4_vdiffsplit(file)
         depot_content = {}
     elseif action == 'move/add' then
         -- For move/add, get content from movedFile at #have
-        depot_content = p4_cmd({cmd = 'print -q ', filepath = moved_file, revision = have_rev})
+        depot_content = p4_cmd({cmd = 'print -q ', filepath = moved_file, revision = have_rev, raw = true})
     else
         -- For edit
-        depot_content = p4_cmd({cmd = 'print -q ', filepath = depot_file, revision = have_rev})
+        depot_content = p4_cmd({cmd = 'print -q ', filepath = depot_file, revision = have_rev, raw = true})
     end
 
     diffsplit.open_file_diffsplit({
@@ -461,14 +462,29 @@ end
 --- Edit the description of a changelist
 local function edit_changelist_description(cn)
     -- Get the change spec
-    local change_spec = p4_cmd({cmd = 'change -o' .. (cn ~= 'default' and ' ' .. cn or '')})
+    local change_spec = p4_cmd({cmd = 'change -o' .. (cn ~= 'default' and cn ~= 'new' and ' ' .. cn or '')})
 
     -- Filter out comment lines (starting with #)
+    -- For new changelists, also strip the Files: section so it creates empty
     local filtered_spec = {}
+    local skip_files_section = false
     for _, line in ipairs(change_spec) do
-        if not line:match('^#') then
-            table.insert(filtered_spec, line)
+        if line:match('^#') then
+            goto continue
         end
+        if cn == 'new' and line:match('^Files:') then
+            skip_files_section = true
+            goto continue
+        end
+        if skip_files_section then
+            if line:match('^%S') then
+                skip_files_section = false
+            else
+                goto continue
+            end
+        end
+        table.insert(filtered_spec, line)
+        ::continue::
     end
 
     -- Add documentation header
@@ -596,29 +612,13 @@ local function input_action()
     end
 end
 
-local function shelve_files()
-    local data = get_action_data()
+local function create_new_changelist()
+    edit_changelist_description('new')
+end
 
-    -- Shelve single file
-    if data.type == 'opened_file' then
-        local file = data.opened_file
-        local current_cl = data.change_number
-        if current_cl == 'default' then
-            vim.notify('Cannot shelve files in default changelist', vim.log.levels.WARN)
-            return
-        end
-        p4_cmd({cmd = 'shelve -f -c ' .. current_cl .. ' ', filepath = file.depot_path})
-        show_window()
-    -- Shelve all files in changelist (via Files header)
-    elseif data.type == 'files_header' then
-        local cn = data.change_number
-        if cn == 'default' then
-            vim.notify('Cannot shelve files in default changelist', vim.log.levels.WARN)
-            return
-        end
-        p4_cmd({cmd = 'shelve -f -c ' .. cn})
-        show_window()
-    end
+local function get_cursor_line()
+    local win = get_perforce_window()
+    return utils.get_cursor_position(win).line
 end
 
 local function notify_unresolved(depot_paths)
@@ -632,157 +632,226 @@ local function notify_unresolved(depot_paths)
     end
 end
 
-local function unshelve_files()
-    local data = get_action_data()
-
-    if data.type == 'shelved_file' then
-        local cn = data.change_number
-        local depot_path = data.shelved_file
-        p4_cmd({cmd = 'unshelve -s ' .. cn .. ' -c ' .. cn .. ' ', filepath = depot_path})
-        vim.cmd('checktime')
-        notify_unresolved({depot_path})
-        show_window()
-    elseif data.type == 'shelf_toggle' then
-        local cn = data.change_number
-        -- Bulk unshelve may partially succeed with warnings (e.g. "also opened by",
-        -- "Can't clobber writable file").  Don't treat that as a fatal error.
-        local ok, err = pcall(p4_cmd, {cmd = 'unshelve -s ' .. cn .. ' -c ' .. cn})
-        if not ok then
-            vim.notify(err, vim.log.levels.WARN)
+local function shelve_files(start_line, end_line)
+    local files = {}
+    for line_nr = start_line, end_line do
+        local data = INDEX_MAP[line_nr]
+        if not data then goto continue end
+        if data.type == 'files_header' then
+            local cn = data.change_number
+            if cn == 'default' then
+                vim.notify('Cannot shelve files in default changelist', vim.log.levels.WARN)
+                return
+            end
+            p4_cmd({cmd = 'shelve -f -c ' .. cn})
+            show_window()
+            return
+        elseif data.type == 'opened_file' then
+            table.insert(files, data)
         end
-        vim.cmd('checktime')
-        notify_unresolved(CHANGELISTS[cn].shelved_files)
-        show_window()
+        ::continue::
     end
-end
-
-local function revert_files()
-    local data = get_action_data()
-
-    -- Revert single file
-    if data.type == 'opened_file' then
-        local file = data.opened_file
-        vim.ui.input(
-            { prompt = 'Revert ' .. file.relative_path .. '? (y/N): ' },
-            function(input)
-                if not (input and input:lower() == 'y') then return end
-                p4_cmd({cmd = 'revert ', filepath = file.local_path})
-                vim.cmd('checktime') -- Refresh file in editor if open
-                show_window()
-            end
-        )
-    -- Revert entire changelist
-    elseif data.type == 'files_header' then
-        local cn = data.change_number
-        vim.ui.input(
-            { prompt = 'Revert all files in changelist ' .. cn .. '? (y/N): ' },
-            function(input)
-                if not (input and input:lower() == 'y') then return end
-                vim.cmd('checktime') -- Refresh files in editor if open
-                p4_cmd({cmd = 'revert -c ' .. cn .. ' //...'})
-                show_window()
-            end
-        )
-    end
-end
-
-local function move_files()
-    local data = get_action_data()
-
-    if data.type == 'opened_file' or data.type == 'files_header' then
-        local cl_options = {}
-        for cn, content in pairs(CHANGELISTS) do
-            if cn ~= data.change_number then
-                table.insert(cl_options, string.format('%s: %s', cn, content.description_lines[1]))
-            end
+    if #files == 0 then return end
+    for _, data in ipairs(files) do
+        if data.change_number == 'default' then
+            vim.notify('Cannot shelve files in default changelist', vim.log.levels.WARN)
+            return
         end
-        -- Prompt user for target changelist
-        vim.ui.select(cl_options,
-            { prompt = 'Target changelist:', format_item = function(item) return item end },
-            function(choice)
-                -- Verify that a choice was made
-                if not choice then return end
-                -- Extract target changelist number
-                local target = choice:match('^([^:]+)')
-                -- Move all files
-                if data.type == 'files_header' then
-                    local cn = data.change_number
-                    local files_to_move = CHANGELISTS[cn].opened_files
-                    for _, file in ipairs(files_to_move) do
-                        p4_cmd({cmd = 'reopen -c ' .. target .. ' ', filepath = file.depot_path})
-                    end
-                -- Move single file
-                elseif data.type == 'opened_file' then
-                    p4_cmd({cmd = 'reopen -c ' .. target .. ' ', filepath = data.opened_file.depot_path})
-                end
-                -- Refresh and update display
-                vim.schedule(show_window)
-            end
-        )
     end
+    for _, data in ipairs(files) do
+        pcall(p4_cmd, {cmd = 'shelve -f -c ' .. data.change_number .. ' ', filepath = data.opened_file.depot_path})
+    end
+    show_window()
 end
 
-local function delete_stuff()
-    local data = get_action_data()
-
-    -- Nothing can be done in default changelist
-    if data.change_number == 'default' then
-        vim.notify('Cannot delete items in default changelist', vim.log.levels.WARN)
-        return
+local function unshelve_files(start_line, end_line)
+    local shelved = {}
+    for line_nr = start_line, end_line do
+        local data = INDEX_MAP[line_nr]
+        if not data then goto continue end
+        if data.type == 'shelf_toggle' then
+            local cn = data.change_number
+            local ok, err = pcall(p4_cmd, {cmd = 'unshelve -s ' .. cn .. ' -c ' .. cn})
+            if not ok then
+                vim.notify(err, vim.log.levels.WARN)
+            end
+            vim.cmd('checktime')
+            notify_unresolved(CHANGELISTS[cn].shelved_files)
+            show_window()
+            return
+        elseif data.type == 'shelved_file' then
+            table.insert(shelved, data)
+        end
+        ::continue::
     end
+    if #shelved == 0 then return end
+    local depot_paths = {}
+    for _, data in ipairs(shelved) do
+        pcall(p4_cmd, {cmd = 'unshelve -s ' .. data.change_number .. ' -c ' .. data.change_number .. ' ', filepath = data.shelved_file})
+        table.insert(depot_paths, data.shelved_file)
+    end
+    vim.cmd('checktime')
+    notify_unresolved(depot_paths)
+    show_window()
+end
 
-    -- Delete changelist and everything in it
-    if data.type == 'changelist' then
-        local cn = data.change_number
-        -- Check if user is sure
-        vim.ui.input(
-            { prompt = 'Delete changelist ' .. cn .. ' and all its files? (y/N): ' },
-            function(input)
-                if not (input and input:lower() == 'y') then return end
-                -- First revert all opened files
-                if #CHANGELISTS[cn].opened_files > 0 then
+local function revert_files(start_line, end_line)
+    local files = {}
+    for line_nr = start_line, end_line do
+        local data = INDEX_MAP[line_nr]
+        if not data then goto continue end
+        if data.type == 'files_header' then
+            local cn = data.change_number
+            vim.ui.input(
+                { prompt = 'Revert all files in changelist ' .. cn .. '? (y/N): ' },
+                function(input)
+                    if not (input and input:lower() == 'y') then return end
                     p4_cmd({cmd = 'revert -c ' .. cn .. ' //...'})
-                    vim.cmd('checktime') -- Refresh files in editor if open
+                    vim.cmd('checktime')
+                    show_window()
                 end
-                -- Then delete all shelved files (if any).
-                if #CHANGELISTS[cn].shelved_files > 0 then
-                    p4_cmd({cmd = 'shelve -d -c ' .. cn})
-                end
-                -- Remove all jobs from the changelist
-                for _, job in ipairs(CHANGELISTS[cn].jobs) do
-                    p4_cmd({cmd = 'fix -d -c ' .. cn .. ' ' .. job.id})
-                end
-                -- Finally delete the changelist itself
-                p4_cmd({cmd = 'change -d ' .. cn})
-                vim.schedule(show_window)
-            end
-        )
-
-    -- Delete single shelved file
-    elseif data.type == 'shelved_file' then
-        local cn = data.change_number
-        local depot_path = data.shelved_file
-        vim.ui.input(
-            { prompt = 'Delete shelved file ' .. depot_path .. ' from CL ' .. cn .. '? (y/N): ' },
-            function(input)
-                if not (input and input:lower() == 'y') then return end
-                p4_cmd({cmd = 'shelve -d -c ' .. cn .. ' ', filepath = depot_path})
-                show_window()
-            end
-        )
-
-    -- Delete all the shelved files in a changelist
-    elseif data.type == 'shelf_toggle' then
-        local cn = data.change_number
-        vim.ui.input(
-            { prompt = 'Delete all shelved files in changelist ' .. cn .. '? (y/N): ' },
-            function(input)
-                if not (input and input:lower() == 'y') then return end
-                p4_cmd({cmd = 'shelve -d -c ' .. cn})
-                show_window()
-            end
-        )
+            )
+            return
+        elseif data.type == 'opened_file' then
+            table.insert(files, data.opened_file)
+        end
+        ::continue::
     end
+    if #files == 0 then return end
+    local prompt = #files == 1
+        and 'Revert ' .. files[1].relative_path .. '? (y/N): '
+        or 'Revert ' .. #files .. ' file(s)? (y/N): '
+    vim.ui.input(
+        { prompt = prompt },
+        function(input)
+            if not (input and input:lower() == 'y') then return end
+            for _, file in ipairs(files) do
+                pcall(p4_cmd, {cmd = 'revert ', filepath = file.local_path})
+            end
+            vim.cmd('checktime')
+            show_window()
+        end
+    )
+end
+
+local function move_files(start_line, end_line)
+    local files = {}
+    local source_cls = {}
+    for line_nr = start_line, end_line do
+        local data = INDEX_MAP[line_nr]
+        if not data then goto continue end
+        if data.type == 'files_header' then
+            source_cls[data.change_number] = true
+            for _, file in ipairs(CHANGELISTS[data.change_number].opened_files) do
+                table.insert(files, file)
+            end
+        elseif data.type == 'opened_file' then
+            source_cls[data.change_number] = true
+            table.insert(files, data.opened_file)
+        end
+        ::continue::
+    end
+    if #files == 0 then return end
+    local cl_options = {}
+    for cn, content in pairs(CHANGELISTS) do
+        if not source_cls[cn] then
+            table.insert(cl_options, string.format('%s: %s', cn, content.description_lines[1]))
+        end
+    end
+    vim.ui.select(cl_options,
+        { prompt = 'Target changelist:', format_item = function(item) return item end },
+        function(choice)
+            if not choice then return end
+            local target = choice:match('^([^:]+)')
+            for _, file in ipairs(files) do
+                pcall(p4_cmd, {cmd = 'reopen -c ' .. target .. ' ', filepath = file.depot_path})
+            end
+            vim.schedule(show_window)
+        end
+    )
+end
+
+local function delete_stuff(start_line, end_line)
+    local data = INDEX_MAP[start_line]
+
+    -- Single-line special cases
+    if start_line == end_line and data then
+        if data.change_number == 'default' then
+            vim.notify('Cannot delete items in default changelist', vim.log.levels.WARN)
+            return
+        end
+        if data.type == 'changelist' then
+            local cn = data.change_number
+            vim.ui.input(
+                { prompt = 'Delete changelist ' .. cn .. ' and all its files? (y/N): ' },
+                function(input)
+                    if not (input and input:lower() == 'y') then return end
+                    if #CHANGELISTS[cn].opened_files > 0 then
+                        p4_cmd({cmd = 'revert -c ' .. cn .. ' //...'})
+                        vim.cmd('checktime')
+                    end
+                    if #CHANGELISTS[cn].shelved_files > 0 then
+                        p4_cmd({cmd = 'shelve -d -c ' .. cn})
+                    end
+                    for _, job in ipairs(CHANGELISTS[cn].jobs) do
+                        p4_cmd({cmd = 'fix -d -c ' .. cn .. ' ' .. job.id})
+                    end
+                    p4_cmd({cmd = 'change -d ' .. cn})
+                    vim.schedule(show_window)
+                end
+            )
+            return
+        end
+        if data.type == 'shelf_toggle' then
+            local cn = data.change_number
+            vim.ui.input(
+                { prompt = 'Delete all shelved files in changelist ' .. cn .. '? (y/N): ' },
+                function(input)
+                    if not (input and input:lower() == 'y') then return end
+                    p4_cmd({cmd = 'shelve -d -c ' .. cn})
+                    show_window()
+                end
+            )
+            return
+        end
+    end
+
+    -- General case: collect opened and shelved files from range
+    local opened = {}
+    local shelved = {}
+    for line_nr = start_line, end_line do
+        local d = INDEX_MAP[line_nr]
+        if not d then goto continue end
+        if d.change_number == 'default' then
+            vim.notify('Cannot delete items in default changelist', vim.log.levels.WARN)
+            return
+        end
+        if d.type == 'opened_file' then
+            table.insert(opened, d.opened_file)
+        elseif d.type == 'shelved_file' then
+            table.insert(shelved, d)
+        end
+        ::continue::
+    end
+    local total = #opened + #shelved
+    if total == 0 then return end
+    local prompt = total == 1
+        and 'Delete ' .. (opened[1] and opened[1].relative_path or shelved[1].shelved_file) .. '? (y/N): '
+        or 'Delete ' .. total .. ' item(s)? (y/N): '
+    vim.ui.input(
+        { prompt = prompt },
+        function(input)
+            if not (input and input:lower() == 'y') then return end
+            for _, file in ipairs(opened) do
+                pcall(p4_cmd, {cmd = 'revert ', filepath = file.local_path})
+            end
+            for _, s in ipairs(shelved) do
+                pcall(p4_cmd, {cmd = 'shelve -d -c ' .. s.change_number .. ' ', filepath = s.shelved_file})
+            end
+            vim.cmd('checktime')
+            show_window()
+        end
+    )
 end
 
 local function show_diff()
@@ -1059,14 +1128,36 @@ local function initialize_buffer()
         utils.dismiss_buffer_window(win, buf)
     end, opts)
     vim.keymap.set('n', '<CR>', input_action, opts)
-    vim.keymap.set('n', 'r', revert_files, opts)
-    vim.keymap.set('n', 'm', move_files, opts)
-    vim.keymap.set('n', 's', shelve_files, opts)
-    vim.keymap.set('n', 'u', unshelve_files, opts)
-    vim.keymap.set('n', 'D', delete_stuff, opts)
     vim.keymap.set('n', 'd', show_diff, opts)
     vim.keymap.set('n', 'S', sync_files, opts)
     vim.keymap.set('n', 'R', resolve_files, opts)
+    vim.keymap.set('n', 'n', create_new_changelist, opts)
+
+    local function normal(fn)
+        return function()
+            local line = get_cursor_line()
+            fn(line, line)
+        end
+    end
+    vim.keymap.set('n', 'r', normal(revert_files), opts)
+    vim.keymap.set('n', 'm', normal(move_files), opts)
+    vim.keymap.set('n', 's', normal(shelve_files), opts)
+    vim.keymap.set('n', 'u', normal(unshelve_files), opts)
+    vim.keymap.set('n', 'D', normal(delete_stuff), opts)
+    local function visual(fn)
+        return function()
+            local start_line = vim.fn.line('v')
+            local end_line = vim.fn.line('.')
+            if start_line > end_line then start_line, end_line = end_line, start_line end
+            vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes('<Esc>', true, false, true), 'nx', false)
+            fn(start_line, end_line)
+        end
+    end
+    vim.keymap.set('v', 'r', visual(revert_files), opts)
+    vim.keymap.set('v', 'm', visual(move_files), opts)
+    vim.keymap.set('v', 's', visual(shelve_files), opts)
+    vim.keymap.set('v', 'u', visual(unshelve_files), opts)
+    vim.keymap.set('v', 'D', visual(delete_stuff), opts)
 
     return buf
 end
@@ -1149,8 +1240,8 @@ local function setup_display_lines()
         table.insert(INDEX_MAP, { type = 'separator' })
     end
 
-    -- Help line
-    table.insert(lines, '[Enter=open/edit/toggle | d=diff | r=revert | m=move | s=shelve | u=unshelve | D=delete | S=sync | R=resolve]')
+    -- Help lines
+    table.insert(lines, '[Enter=open/edit/toggle | d=diff | r=revert | m=move | s=shelve | u=unshelve | D=delete | S=sync | R=resolve | n=new CL ]')
 
     return lines
 end

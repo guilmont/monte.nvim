@@ -61,22 +61,51 @@ local function relative_to_root(root, file)
     return vim.fn.fnamemodify(file, ':t')
 end
 
+local parse_status_line -- forward declaration
+
+-- Status of a single file relative to root, or nil if unchanged/unknown.
+local function file_status(root, file)
+    local relpath = relative_to_root(root, file)
+    local out = git_cmd({ cwd = root, cmd = 'status --porcelain=v1 -- ' .. vim.fn.shellescape(relpath) })
+    for _, line in ipairs(out) do
+        local entry = parse_status_line(root, line)
+        -- porcelain reports renames as "old -> new"; match on the new path.
+        if entry and (entry.relpath == relpath or entry.abs_path == file) then
+            return entry
+        end
+    end
+    return nil
+end
+
 local function git_vdiffsplit(file)
     file = vim.fn.resolve(file)
     local root = get_git_root(file)
     local relpath = relative_to_root(root, file)
 
+    -- Decide the diff base from the file's status, so we never silently diff a
+    -- new/untracked file against an empty buffer and paint the whole panel blue.
+    -- The path we read at HEAD is the rename origin for renames, else the file.
+    local status = file_status(root, file)
+    local base_path = (status and status.orig) or relpath
     local base_content = {}
-    local left_name = 'Git HEAD (empty)'
+    local left_name
 
-    local ok, result = pcall(git_cmd, {
-        cwd = vim.fn.fnamemodify(file, ':h'),
-        cmd = 'show HEAD:./' .. vim.fn.shellescape(vim.fn.fnamemodify(file, ':t')),
-    })
-
-    if ok then
-        base_content = result
-        left_name = 'Git HEAD:' .. relpath
+    if status and status.untracked then
+        left_name = 'Git (untracked — no base): ' .. relpath
+        vim.notify('Git: ' .. relpath .. ' is untracked; diffing against empty base', vim.log.levels.INFO)
+    else
+        local ok, result = pcall(git_cmd, {
+            cwd = root,
+            cmd = 'show HEAD:./' .. vim.fn.shellescape(base_path),
+        })
+        if ok then
+            base_content = result
+            left_name = 'Git HEAD:' .. base_path
+        else
+            -- Not in HEAD (e.g. staged new file) — empty base, but say so.
+            left_name = 'Git (new file — no base): ' .. relpath
+            vim.notify('Git: ' .. relpath .. ' has no version at HEAD; diffing against empty base', vim.log.levels.INFO)
+        end
     end
 
     diffsplit.open_file_diffsplit({
@@ -87,7 +116,7 @@ local function git_vdiffsplit(file)
     })
 end
 
-local function parse_status_line(root, line)
+parse_status_line = function(root, line)
     if not line or line == '' then
         return nil
     end
@@ -102,6 +131,11 @@ local function parse_status_line(root, line)
     local relpath = raw_path:match('-> (.+)$') or raw_path
     relpath = relpath:gsub('^"', ''):gsub('"$', '')
 
+    -- For renames/copies the raw path is "old -> new"; capture the origin so
+    -- the diff can use the original path at HEAD as its base.
+    local orig = raw_path:match('^(.-) %-> ')
+    if orig then orig = orig:gsub('^"', ''):gsub('"$', '') end
+
     local absolute_path = root .. '/' .. relpath
     local is_untracked = x == '?' and y == '?'
     local is_staged = not is_untracked and x ~= ' '
@@ -110,6 +144,7 @@ local function parse_status_line(root, line)
     return {
         root = root,
         relpath = relpath,
+        orig = orig,
         abs_path = absolute_path,
         staged = is_staged,
         unstaged = is_unstaged,
