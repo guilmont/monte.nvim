@@ -4,7 +4,7 @@ local utils = require('custom.utils')
 local BUFFER_NAME = 'Git Window'
 local INDEX_MAP = {}
 local GIT_CHANGES = {}
-local STATUS_COLUMN_WIDTH = 13
+local STATUS_COLUMN_WIDTH = 8
 local STATUS_LABELS = {
     M = 'MOD',
     A = 'ADD',
@@ -154,27 +154,35 @@ parse_status_line = function(root, line)
     }
 end
 
-local function item_status_text(item)
-    if item.untracked then
-        return 'UNTRACKED'
+-- Short badge shown for a file within a given section.
+local function badge_for(item, section)
+    if section == 'staged' then
+        return item.staged_label or 'MOD'
+    elseif section == 'unstaged' then
+        return item.unstaged_label or 'MOD'
     end
+    return 'NEW'
+end
 
-    local parts = {}
-    if item.staged and item.staged_label then
-        table.insert(parts, 'INDEX:' .. item.staged_label)
+-- Partition the flat change list into the three review sections. A file with
+-- both staged and unstaged changes (e.g. "MM") appears in both.
+local function build_sections(changes)
+    local staged, unstaged, untracked = {}, {}, {}
+    for _, item in ipairs(changes) do
+        if item.untracked then
+            table.insert(untracked, item)
+        else
+            if item.staged then table.insert(staged, item) end
+            if item.unstaged then table.insert(unstaged, item) end
+        end
     end
-    if item.unstaged and item.unstaged_label then
-        table.insert(parts, 'WORKTREE:' .. item.unstaged_label)
-    end
-    if #parts == 0 then
-        table.insert(parts, 'UNCHANGED')
-    end
-
-    return table.concat(parts, ' | ')
+    return staged, unstaged, untracked
 end
 
 local function get_git_changes(root)
-    local lines = git_cmd({ cwd = root, cmd = 'status --porcelain=v1' })
+    -- -uall expands untracked directories to their individual files; without it
+    -- git collapses e.g. "foo/" into one line and hides everything inside.
+    local lines = git_cmd({ cwd = root, cmd = 'status --porcelain=v1 -uall' })
     local changes = {}
 
     for _, line in ipairs(lines) do
@@ -215,13 +223,20 @@ local function get_action_line()
     return utils.get_cursor_position(win).line
 end
 
-local function current_item()
+-- The file entry under the cursor, including which section row it is (staged /
+-- unstaged / untracked) since a file may appear in more than one section.
+local function current_entry()
     local line = get_action_line()
     local data = INDEX_MAP[line]
     if not data or data.type ~= 'file' then
         return nil
     end
-    return data.item
+    return data
+end
+
+local function current_item()
+    local data = current_entry()
+    return data and data.item or nil
 end
 
 local function input_action()
@@ -289,12 +304,14 @@ local function revert_file()
 end
 
 local function toggle_stage_file()
-    local item = current_item()
-    if not item then
+    local entry = current_entry()
+    if not entry then
         return
     end
+    local item = entry.item
 
-    if item.staged then
+    -- Unstage only when acting on a row in the Staged section; otherwise stage.
+    if entry.section == 'staged' then
         git_cmd({ cwd = item.root, cmd = 'restore --staged -- ' .. vim.fn.shellescape(item.relpath) })
         vim.notify('Git: unstaged ' .. item.relpath, vim.log.levels.INFO)
     else
@@ -303,6 +320,35 @@ local function toggle_stage_file()
     end
 
     show_window()
+end
+
+local function stage_all()
+    local root = current_git_root()
+    git_cmd({ cwd = root, cmd = 'add -A' })
+    vim.notify('Git: staged all changes', vim.log.levels.INFO)
+    show_window()
+end
+
+local function unstage_all()
+    local root = current_git_root()
+    git_cmd({ cwd = root, cmd = 'reset -q HEAD --' })
+    vim.notify('Git: unstaged all changes', vim.log.levels.INFO)
+    show_window()
+end
+
+local function discard_all()
+    local root = current_git_root()
+    vim.ui.input({ prompt = 'Discard ALL changes and remove untracked files? (y/N): ' }, function(input)
+        if not (input and input:lower() == 'y') then
+            return
+        end
+        git_cmd({ cwd = root, cmd = 'reset -q HEAD --' })
+        git_cmd({ cwd = root, cmd = 'checkout -- .' })
+        git_cmd({ cwd = root, cmd = 'clean -fd' })
+        vim.cmd('checktime')
+        vim.notify('Git: discarded all changes', vim.log.levels.INFO)
+        show_window()
+    end)
 end
 
 local function commit_changes()
@@ -378,6 +424,9 @@ local function initialize_buffer()
     vim.keymap.set('n', 'd', show_diff, opts)
     vim.keymap.set('n', 'r', revert_file, opts)
     vim.keymap.set('n', 's', toggle_stage_file, opts)
+    vim.keymap.set('n', 'a', stage_all, opts)
+    vim.keymap.set('n', 'A', unstage_all, opts)
+    vim.keymap.set('n', 'D', discard_all, opts)
     vim.keymap.set('n', 'c', commit_changes, opts)
     vim.keymap.set('n', 'g', open_lazygit, opts)
     vim.keymap.set('n', 'q', function()
@@ -390,28 +439,40 @@ end
 local function setup_display_lines(root)
     INDEX_MAP = {}
 
-    local lines = {
-        'Git Review: ' .. root,
-        '',
-    }
-    table.insert(INDEX_MAP, { type = 'header' })
-    table.insert(INDEX_MAP, { type = 'separator' })
-
-    if #GIT_CHANGES == 0 then
-        table.insert(lines, 'Working tree clean.')
-        table.insert(INDEX_MAP, { type = 'info' })
-    else
-        local row_fmt = '[ %-' .. STATUS_COLUMN_WIDTH .. 's] %s'
-        for _, item in ipairs(GIT_CHANGES) do
-            table.insert(lines, string.format(row_fmt, item_status_text(item), item.relpath))
-            table.insert(INDEX_MAP, { type = 'file', item = item })
-        end
+    local lines = {}
+    local function push(line, entry)
+        table.insert(lines, line)
+        table.insert(INDEX_MAP, entry)
     end
 
-    table.insert(lines, '')
-    table.insert(lines, '[Enter=open | d=diff | r=revert | s=stage/unstage | c=commit | g=lazygit | q=close]')
-    table.insert(INDEX_MAP, { type = 'separator' })
-    table.insert(INDEX_MAP, { type = 'help' })
+    push('Git Review: ' .. root, { type = 'header' })
+    push('', { type = 'separator' })
+
+    if #GIT_CHANGES == 0 then
+        push('Working tree clean.', { type = 'info' })
+    else
+        local staged, unstaged, untracked = build_sections(GIT_CHANGES)
+        local row_fmt = '  [ %-' .. STATUS_COLUMN_WIDTH .. 's] %s'
+
+        local function section(title, items, kind)
+            if #items == 0 then
+                return
+            end
+            push(string.format('%s (%d)', title, #items), { type = 'section' })
+            for _, item in ipairs(items) do
+                push(string.format(row_fmt, badge_for(item, kind), item.relpath),
+                    { type = 'file', item = item, section = kind })
+            end
+            push('', { type = 'separator' })
+        end
+
+        section('Staged', staged, 'staged')
+        section('Unstaged', unstaged, 'unstaged')
+        section('Untracked', untracked, 'untracked')
+    end
+
+    push('[Enter=open d=diff r=revert s=stage a=stage-all A=unstage-all D=discard-all c=commit g=lazygit q=close]',
+        { type = 'help' })
 
     return lines
 end
@@ -422,16 +483,33 @@ local function apply_syntax_highlighting(buf)
     local ns_id = vim.api.nvim_create_namespace('GitWindowHighlight')
     local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
 
+    -- Per-badge highlight groups so status reads at a glance.
+    local badge_hl = {
+        MOD = 'DiffChange',
+        ADD = 'DiffAdd',
+        NEW = 'DiffAdd',
+        DEL = 'DiffDelete',
+        REN = 'DiffChange',
+        COPY = 'DiffChange',
+        TYPE = 'DiffChange',
+        UNMERGED = 'ErrorMsg',
+        IGNORED = 'Comment',
+    }
+
     for i, line in ipairs(lines) do
         local line_idx = i - 1
+        local entry = INDEX_MAP[i]
 
         if line:match('^Git Review:') then
             vim.api.nvim_buf_add_highlight(buf, ns_id, 'Title', line_idx, 0, #line)
-        elseif line:match('^%[[^%]]+%] ') then
-            local status_end = line:find('%]')
-            if status_end then
-                vim.api.nvim_buf_add_highlight(buf, ns_id, 'Keyword', line_idx, 0, status_end)
-                vim.api.nvim_buf_add_highlight(buf, ns_id, 'String', line_idx, status_end + 1, #line)
+        elseif entry and entry.type == 'section' then
+            vim.api.nvim_buf_add_highlight(buf, ns_id, 'Title', line_idx, 0, #line)
+        elseif entry and entry.type == 'file' then
+            local badge_start, badge_finish, badge = line:find('%[ (%S+)%s*%]')
+            if badge_start then
+                local hl = badge_hl[badge] or 'Keyword'
+                vim.api.nvim_buf_add_highlight(buf, ns_id, hl, line_idx, badge_start - 1, badge_finish)
+                vim.api.nvim_buf_add_highlight(buf, ns_id, 'Normal', line_idx, badge_finish, #line)
             end
         elseif line:match('^%[Enter=') then
             vim.api.nvim_buf_add_highlight(buf, ns_id, 'Comment', line_idx, 0, #line)

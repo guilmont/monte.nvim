@@ -133,10 +133,15 @@ Completion is manual by design. `Tab` is reserved for Copilot.
 | `n` | `Enter` | Open selected file |
 | `n` | `d` | Diff selected file |
 | `n` | `r` | Revert selected file |
-| `n` | `s` | Toggle stage / unstage |
+| `n` | `s` | Toggle stage / unstage (based on the section the cursor is in) |
+| `n` | `a` | Stage all changes |
+| `n` | `A` | Unstage all changes |
+| `n` | `D` | Discard all changes and remove untracked files |
 | `n` | `c` | Commit staged changes |
 | `n` | `g` | Open `lazygit` |
 | `n` | `q` | Close Git window |
+
+Files are grouped into **Staged**, **Unstaged**, and **Untracked** sections with a colored status badge per file. Untracked directories are expanded to their individual files.
 
 #### Git diff view
 
