@@ -17,6 +17,7 @@ local STATUS_LABELS = {
 }
 
 local show_window -- forward declaration
+local cached_buf = nil
 
 local function git_cmd(args)
     if not args or not args.cmd or args.cmd == '' then
@@ -414,10 +415,10 @@ end
 local function close_git_window(buf)
     local win = utils.find_window_by_buffer(buf)
     utils.dismiss_buffer_window(win, buf)
+    cached_buf = nil
 end
 
-local function initialize_buffer()
-    local buf = utils.create_scratch_buffer(BUFFER_NAME, false)
+local function setup_keymaps(buf)
     local opts = { buffer = buf, nowait = true, noremap = true, silent = true }
 
     vim.keymap.set('n', '<CR>', input_action, opts)
@@ -432,7 +433,14 @@ local function initialize_buffer()
     vim.keymap.set('n', 'q', function()
         close_git_window(buf)
     end, opts)
+end
 
+local function get_or_create_buffer()
+    if cached_buf and vim.api.nvim_buf_is_valid(cached_buf) then
+        return cached_buf
+    end
+    local buf = utils.create_scratch_buffer(BUFFER_NAME, false)
+    cached_buf = buf
     return buf
 end
 
@@ -522,16 +530,15 @@ end
 show_window = function()
     local root = current_git_root()
 
+    local buffer = get_or_create_buffer()
+
     local saved_cursor_pos = nil
-    local buffer = utils.find_buffer_by_name(BUFFER_NAME)
-    if buffer then
-        local win = utils.find_window_by_buffer(buffer)
-        if win then
-            saved_cursor_pos = utils.get_cursor_position(win)
-        end
-    else
-        buffer = initialize_buffer()
+    local win = utils.find_window_by_buffer(buffer)
+    if win then
+        saved_cursor_pos = utils.get_cursor_position(win)
     end
+
+    setup_keymaps(buffer)
 
     -- Take over as main window
     local target_win = utils.close_other_windows()

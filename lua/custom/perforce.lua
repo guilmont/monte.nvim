@@ -430,6 +430,7 @@ local BUFFER_NAME = 'Perforce Window'
 local EXPAND_SHELF = {}  -- per-changelist: EXPAND_SHELF[cn] = true/false
 local CHANGELISTS = {}
 local INDEX_MAP = {}
+local cached_buf = nil
 
 local show_window -- forward declaration for actions use
 
@@ -884,6 +885,30 @@ local function sync_files()
     end
 end
 
+local function sync_files_range(start_line, end_line)
+    local depot_paths = {}
+    for line_nr = start_line, end_line do
+        local data = INDEX_MAP[line_nr]
+        if not data then goto continue end
+        if data.type == 'files_header' then
+            for _, file in ipairs(CHANGELISTS[data.change_number].opened_files) do
+                depot_paths[file.depot_path] = true
+            end
+        elseif data.type == 'opened_file' then
+            depot_paths[data.opened_file.depot_path] = true
+        end
+        ::continue::
+    end
+    local paths = vim.tbl_keys(depot_paths)
+    if #paths == 0 then return end
+    for _, path in ipairs(paths) do
+        p4_cmd({cmd = 'sync ', filepath = path})
+    end
+    vim.cmd('checktime')
+    notify_unresolved(paths)
+    show_window()
+end
+
 local function resolve_files()
     local data = get_action_data()
 
@@ -1113,19 +1138,38 @@ local function resolve_files()
     end)
 end
 
+local function resolve_files_range(start_line, end_line)
+    local files = {}
+    for line_nr = start_line, end_line do
+        local data = INDEX_MAP[line_nr]
+        if not data then goto continue end
+        if data.type == 'files_header' then
+            for _, file in ipairs(CHANGELISTS[data.change_number].opened_files) do
+                table.insert(files, file)
+            end
+        elseif data.type == 'opened_file' then
+            table.insert(files, data.opened_file)
+        end
+        ::continue::
+    end
+    if #files == 0 then return end
+    for _, file in ipairs(files) do
+        pcall(p4_cmd, {cmd = 'resolve -am ', filepath = file.depot_path})
+    end
+    vim.cmd('checktime')
+    show_window()
+end
+
 -- ===========================================================================
 -- PERFORCE WINDOW
 -- ===========================================================================
 
---- Initialize or clear the output buffer
-local function initialize_buffer()
-    -- Create a brand new buffer
-    local buf = utils.create_scratch_buffer(BUFFER_NAME, false)
-    -- Setup keymaps for the buffer
+local function setup_keymaps(buf)
     local opts = { buffer = buf, nowait = true, noremap = true, silent = true }
     vim.keymap.set('n', 'q', function()
         local win = utils.find_window_by_buffer(buf)
         utils.dismiss_buffer_window(win, buf)
+        cached_buf = nil
     end, opts)
     vim.keymap.set('n', '<CR>', input_action, opts)
     vim.keymap.set('n', 'd', show_diff, opts)
@@ -1158,7 +1202,16 @@ local function initialize_buffer()
     vim.keymap.set('v', 's', visual(shelve_files), opts)
     vim.keymap.set('v', 'u', visual(unshelve_files), opts)
     vim.keymap.set('v', 'D', visual(delete_stuff), opts)
+    vim.keymap.set('v', 'S', visual(sync_files_range), opts)
+    vim.keymap.set('v', 'R', visual(resolve_files_range), opts)
+end
 
+local function get_or_create_buffer()
+    if cached_buf and vim.api.nvim_buf_is_valid(cached_buf) then
+        return cached_buf
+    end
+    local buf = utils.create_scratch_buffer(BUFFER_NAME, false)
+    cached_buf = buf
     return buf
 end
 
@@ -1357,18 +1410,15 @@ end
 
 
 show_window = function()
-    -- Capture cursor position from existing perforce window before recreating buffer
+    local buffer = get_or_create_buffer()
+
     local saved_cursor_pos = nil
-    local buffer = utils.find_buffer_by_name(BUFFER_NAME)
-    if buffer then
-        local win = utils.find_window_by_buffer(buffer)
-        if win then
-            saved_cursor_pos = utils.get_cursor_position(win)
-        end
-    else
-        -- Create a fresh buffer
-        buffer = initialize_buffer()
+    local win = utils.find_window_by_buffer(buffer)
+    if win then
+        saved_cursor_pos = utils.get_cursor_position(win)
     end
+
+    setup_keymaps(buffer)
 
     -- Take over as main window
     local target_win = utils.close_other_windows()

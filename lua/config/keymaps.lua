@@ -38,8 +38,19 @@ vim.keymap.set({ 'n', 'v' }, '<M-Right>', 'w', { silent = true, desc = 'Word rig
 vim.keymap.set('i', '<M-Left>', '<C-o>b', { silent = true, desc = 'Word left' })
 vim.keymap.set('i', '<M-Right>', '<C-o>w', { silent = true, desc = 'Word right' })
 
+-- ============================================================================
+-- Black hole register for delete/change (don't clobber clipboard)
+-- ============================================================================
+vim.keymap.set({ 'n', 'v' }, 'c', '"_c', { silent = true })
+vim.keymap.set({ 'n', 'v' }, 'C', '"_C', { silent = true })
+vim.keymap.set({ 'n', 'v' }, 'x', '"_x', { silent = true })
+vim.keymap.set({ 'n', 'v' }, 'X', '"_X', { silent = true })
+vim.keymap.set({ 'n', 'v' }, 's', '"_s', { silent = true })
+vim.keymap.set({ 'n', 'v' }, 'S', '"_S', { silent = true })
+vim.keymap.set({ 'n', 'v' }, '<Del>', '"_x', { silent = true })
+
 -- Word-wise delete
-vim.keymap.set('n', '<M-Del>', 'dw', { silent = true, desc = 'Word right' })
-vim.keymap.set('n', '<M-BS>', 'db', { silent = true, desc = 'Word right' })
-vim.keymap.set('i', '<M-Del>', '<C-o>dw', { silent = true, desc = 'Delete next word' })
-vim.keymap.set('i', '<M-BS>', '<C-o>db', { silent = true, desc = 'Delete previous word' })
+vim.keymap.set('n', '<M-Del>', '"_dw', { silent = true, desc = 'Delete next word' })
+vim.keymap.set('n', '<M-BS>', '"_db', { silent = true, desc = 'Delete previous word' })
+vim.keymap.set('i', '<M-Del>', '<C-o>"_dw', { silent = true, desc = 'Delete next word' })
+vim.keymap.set('i', '<M-BS>', '<C-o>"_db', { silent = true, desc = 'Delete previous word' })
