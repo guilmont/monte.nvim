@@ -6,7 +6,6 @@ A minimal Neovim setup with VS Code-like editing, solid LSP defaults, and custom
 
 - VS Code-like editing keybindings for moving lines and word-wise navigation
 - Mason + lspconfig based LSP setup with simple defaults
-- GitHub Copilot with `Alt+Enter` accept
 - Telescope for files, buffers, and grep
 - Neo-tree for file browsing
 - Custom Git review window with diff, stage toggle, commit, and `lazygit`
@@ -20,7 +19,6 @@ A minimal Neovim setup with VS Code-like editing, solid LSP defaults, and custom
 - Neovim 0.9+
 - Git
 - A C compiler or `make` for `telescope-fzf-native`
-- Node.js for Copilot and some language servers
 - Optional: `ripgrep` for Telescope live grep
 - Optional: `p4` for Perforce support
 - Optional: `lazygit` for Git TUI integration
@@ -44,7 +42,6 @@ On first launch, `lazy.nvim` bootstraps itself and installs plugins automaticall
 2. Run `:Mason`
 3. Install the language servers you want
 4. Run `:LspSetupInstalled` or restart Neovim
-5. Run `:Copilot setup`
 
 ## Keybindings
 
@@ -103,17 +100,6 @@ On first launch, `lazy.nvim` bootstraps itself and installs plugins automaticall
 | `i` | `Ctrl+Space` | Trigger completion |
 | `i` | `Enter` | Confirm selected completion |
 
-Completion is manual by design. `Tab` is reserved for Copilot.
-
-### Copilot
-
-| Mode | Key | Action |
-|------|-----|--------|
-| `i` | `Alt+Enter` | Accept suggestion |
-| `i` | `Alt+]` | Next suggestion |
-| `i` | `Alt+[` | Previous suggestion |
-| `i` | `Alt+d` | Dismiss suggestion |
-| `i` | `Alt+\` | Trigger suggestion |
 
 ### Git
 
@@ -243,7 +229,6 @@ Aligns the first match of the pattern to the same column across all selected lin
 │   └── plugins/
 │       ├── colors.lua
 │       ├── completion.lua
-│       ├── copilot.lua
 │       ├── guess-indent.lua
 │       ├── lsp.lua
 │       ├── neo-tree.lua
@@ -268,7 +253,6 @@ Aligns the first match of the pattern to the same column across all selected lin
 - [telescope.nvim](https://github.com/nvim-telescope/telescope.nvim)
 - [telescope-fzf-native.nvim](https://github.com/nvim-telescope/telescope-fzf-native.nvim)
 - [neo-tree.nvim](https://github.com/nvim-neo-tree/neo-tree.nvim)
-- [copilot.vim](https://github.com/github/copilot.vim)
 
 Git, Perforce, diff handling, and the command runner are implemented in the `lua/custom/` modules rather than through an extra plugin.
 
@@ -292,12 +276,6 @@ The theme is configured in [lua/plugins/colors.lua](lua/plugins/colors.lua). Cha
 - Check `:LspLog`
 - After installing servers in Mason, run `:LspSetupInstalled` or restart Neovim
 
-### Copilot
-
-- Check `:Copilot status`
-- Run `:Copilot setup`
-- Try `:Copilot restart`
-
 ### Telescope grep
 
 - Install `ripgrep`
@@ -318,7 +296,6 @@ The theme is configured in [lua/plugins/colors.lua](lua/plugins/colors.lua). Cha
 ## Notes
 
 - Leader key is `Space`
-- `Tab` is reserved for Copilot
 - Completion is manual
 - Trailing whitespace and final blank lines are trimmed on save
 - Indentation defaults to 4 spaces and is refined per file by `guess-indent.nvim`
