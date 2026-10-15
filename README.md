@@ -235,6 +235,9 @@ Aligns the first match of the pattern to the same column across all selected lin
 │       ├── telescope.lua
 │       ├── treesitter.lua
 │       └── ui.lua
+├── tests/
+│   ├── perforce_test.lua
+│   └── run_test.lua
 └── README.md
 ```
 
@@ -300,6 +303,17 @@ The theme is configured in [lua/plugins/colors.lua](lua/plugins/colors.lua). Cha
 - Trailing whitespace and final blank lines are trimmed on save
 - Indentation defaults to 4 spaces and is refined per file by `guess-indent.nvim`
 - Git and Perforce are both supported through separate custom workflows
+
+## Tests
+
+Headless regression tests for the custom modules live in `tests/`. Run them from the repo root:
+
+```bash
+nvim --headless -u NONE -l tests/run_test.lua
+nvim --headless -u NONE -l tests/perforce_test.lua
+```
+
+Each script exits non-zero if a test fails. They need a POSIX shell. The Perforce tests use a fake `p4`, so no server is required.
 
 ## License
 
