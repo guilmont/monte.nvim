@@ -436,12 +436,17 @@ local show_window -- forward declaration for actions use
 
 --- Return window for perforce window if it exists
 local function get_perforce_window()
-    -- Find buffer for perforce window
-    local buf = utils.find_buffer_by_name(BUFFER_NAME)
-    if not buf then
+    -- Use the buffer this module created rather than looking it up by name:
+    -- another buffer with the same name may exist.
+    local buf = cached_buf
+    if not buf or not vim.api.nvim_buf_is_valid(buf) then
         error('No valid Perforce buffer for action')
     end
-    -- Find window displaying that buffer
+    -- Actions are buffer-local keymaps, so normally the current window shows it
+    local current = utils.get_current_window()
+    if utils.get_window_buffer(current) == buf then
+        return current
+    end
     local win = utils.find_window_by_buffer(buf)
     if win then
         return win
@@ -1410,6 +1415,23 @@ end
 
 
 show_window = function()
+    -- Query Perforce before touching any buffers or windows, so a failure (no
+    -- server, not inside a client workspace) leaves the editor untouched.
+    local ok, result = pcall(function()
+        local info = get_client_info()
+        if info.root == '' then
+            error('not inside a Perforce client workspace (p4 info reports no client root)', 0)
+        end
+        return get_client_changelists(info)
+    end)
+    if not ok then
+        -- Drop the "file:line: " prefix that error() adds inside p4_cmd
+        local msg = tostring(result):gsub('^[^\n]-:%d+: ', '')
+        vim.notify('Perforce: ' .. vim.trim(msg), vim.log.levels.ERROR)
+        return
+    end
+    CHANGELISTS = result
+
     local buffer = get_or_create_buffer()
 
     local saved_cursor_pos = nil
@@ -1424,8 +1446,6 @@ show_window = function()
     local target_win = utils.close_other_windows()
 
     -- Build lines and index map
-    local info = get_client_info()
-    CHANGELISTS = get_client_changelists(info)
     local lines = setup_display_lines()
 
     -- Show buffer in the single remaining window
@@ -1441,7 +1461,7 @@ show_window = function()
     utils.set_current_window(target_win)
     -- Restore cursor position if we had one saved
     if saved_cursor_pos then
-        pcall(utils.set_cursor_position, target_win, saved_cursor_pos.line, saved_cursor_pos.col)
+        pcall(utils.set_cursor_position, target_win, saved_cursor_pos.line, saved_cursor_pos.column)
     end
 end
 
