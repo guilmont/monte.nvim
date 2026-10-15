@@ -3,16 +3,36 @@
 -- Module table to hold all utility functions.
 local M = {}
 
+M.is_windows = vim.fn.has('win32') == 1
+
 -- ========================================================================
 -- Buffer utilities
 -- ========================================================================
 
 -- Find buffer ID by name and return its ID.
+-- Neovim expands scratch buffer names to full paths (e.g. '<cwd>/Git Window'),
+-- so the name is compared against the last path component, not as a substring.
 function M.find_buffer_by_name(name)
-    local buffers = vim.api.nvim_list_bufs()
-    for _, bufnr in ipairs(buffers) do
+    for _, bufnr in ipairs(vim.api.nvim_list_bufs()) do
+        if vim.fs.basename(vim.api.nvim_buf_get_name(bufnr)) == name then
+            return bufnr
+        end
+    end
+    return nil
+end
+
+-- Normalize a file path for comparison (separators, and case on Windows).
+local function normalize_path(p)
+    p = vim.fs.normalize(p)
+    return M.is_windows and p:lower() or p
+end
+
+-- Find buffer ID whose full file path exactly matches the given absolute path, or nil.
+function M.find_buffer_by_path(path)
+    local target = normalize_path(path)
+    for _, bufnr in ipairs(vim.api.nvim_list_bufs()) do
         local buf_name = vim.api.nvim_buf_get_name(bufnr)
-        if buf_name:find(name, 1, true) then
+        if buf_name ~= '' and normalize_path(buf_name) == target then
             return bufnr
         end
     end
