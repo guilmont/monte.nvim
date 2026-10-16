@@ -10,7 +10,7 @@ local utils = require('custom.utils')
 local commands_cache = nil
 local environ_cache = nil
 
---- Fill the commands cache from PATH
+--- Fill the commands cache from PATH, if it is still empty
 local function fill_commands_cache()
     if commands_cache == nil then
         -- Build cache of executable commands in PATH
@@ -34,7 +34,7 @@ local function fill_commands_cache()
     end
 end
 
---- Fill environment variables cache
+--- Fill environment variables cache, if it is still empty
 local function fill_environ_cache()
     if environ_cache == nil then
         local env_vars = {}
@@ -45,6 +45,19 @@ local function fill_environ_cache()
     end
 end
 
+--- Escape a completed word for the shell. Windows paths use '\' as the separator
+--- and cmd.exe doesn't use backslash escapes, so they are left alone there.
+local function escape_shell_word(word)
+    if utils.is_windows then return word end
+    return (word:gsub('[%s\\\'"$`&;|<>()*?%[%]{}!#]', '\\%0'))
+end
+
+--- Undo escape_shell_word on what the user typed
+local function unescape_shell_word(word)
+    if utils.is_windows then return word end
+    return (word:gsub('\\(.)', '%1'))
+end
+
 --- Custom completion for Run command
 local function complete_run_command(arg_lead, cmd_line, cursor_pos)
     -- Only provide completion at the end of the command line
@@ -52,28 +65,40 @@ local function complete_run_command(arg_lead, cmd_line, cursor_pos)
         return {}
     end
     -- Determine if we need to provide completion for a command:
-    -- 1) First argument after 'Run'
-    -- 2) After a command separator
-    local separators = { ';', '&&', '||', '|', '(', '{', '\n' }
-    local preceding_text = cmd_line:sub(1, cursor_pos - #arg_lead - 1):match('(%S+)%s*$') or ''
-    local last_char = preceding_text:sub(-1)
-    local is_command_start = preceding_text == 'Run' or vim.tbl_contains(separators, last_char)
+    -- 1) First argument (after 'Run', or an abbreviation such as 'Ru')
+    -- 2) After a command separator (';', '&&', '||', '|', '&', '(', '{')
+    local before_lead = cmd_line:sub(1, cursor_pos - #arg_lead)
+    local preceding_text = before_lead:match('(%S+)%s*$') or ''
+    local is_first_arg = before_lead:match('^[%s:]*%S+%s+$') ~= nil
+    local is_command_start = is_first_arg or preceding_text:match('[;&|({]$') ~= nil
     -- Determine if arg_lead looks like an environment variable, ie, starts with $
     local is_environment_var = arg_lead:match('^%$%a*') ~= nil
+    local lead = unescape_shell_word(arg_lead)
 
-    -- Path-based completion for absolute (/...), relative (./, ../, sub/...), or ~ paths
+    -- Path-based completion for absolute (/...), relative (./, ../, sub/...), or ~ paths.
+    -- Windows accepts both separators.
     local path_sep = package.config:sub(1,1) -- Get path separator for current OS
-    if arg_lead:find(path_sep, 1, true) or arg_lead:sub(1,1) == '~' then
-        local dir = (arg_lead:match('(.*' .. path_sep .. ')') or '.')
-        local base = arg_lead:sub(#dir + 1)
+    local sep_class = utils.is_windows and '[/\\]' or '/'
+    if lead == '~' then lead = '~' .. path_sep end
+    if lead:find(sep_class) then
+        local dir = lead:match('^(.*' .. sep_class .. ')')
+        local base = lead:sub(#dir + 1)
 
-        local expanded_dir = vim.fn.expand(dir)
+        -- Expand a leading ~ to the home directory, but keep it in what is displayed
+        local expanded_dir = dir
+        if dir:match('^~' .. sep_class) then
+            expanded_dir = (vim.env.HOME or vim.fn.expand('~')) .. dir:sub(2)
+        elseif dir:find('[$~]') then
+            expanded_dir = vim.fn.expand(dir)
+        end
         if vim.fn.isdirectory(expanded_dir) == 0 then
             return {}
         end
-        if expanded_dir:sub(-1) ~= path_sep then
+        if not expanded_dir:sub(-1):match(sep_class) then
             expanded_dir = expanded_dir .. path_sep
         end
+        -- Complete directories with the separator the user is already typing
+        local dir_sep = dir:sub(-1)
 
         local entries = vim.fn.readdir(expanded_dir)
         local matches = {}
@@ -81,9 +106,11 @@ local function complete_run_command(arg_lead, cmd_line, cursor_pos)
             if name ~= '.' and name ~= '..' and name:sub(1, #base) == base then
                 local full = expanded_dir .. name
                 local is_dir = vim.fn.isdirectory(full) == 1
-                local display = dir .. name .. (is_dir and path_sep or '')
+                local display = dir .. name .. (is_dir and dir_sep or '')
                 if is_dir or (not is_command_start) or (vim.fn.executable(full) == 1) then
-                    table.insert(matches, display)
+                    -- Leave the ~ unescaped so the shell still expands it
+                    local tilde = display:match('^~') or ''
+                    table.insert(matches, tilde .. escape_shell_word(display:sub(#tilde + 1)))
                 end
             end
         end
@@ -91,14 +118,8 @@ local function complete_run_command(arg_lead, cmd_line, cursor_pos)
     end
 
     if is_command_start then
-        -- If commands cache is empty, fill it
-        if commands_cache == nil then
-            fill_commands_cache()
-        end
+        fill_commands_cache()
         -- Filter cached commands based on arg_lead
-        if commands_cache == nil then
-            return {}
-        end
         local matches = {}
         for _, cmd in ipairs(commands_cache) do
             if cmd:sub(1, #arg_lead) == arg_lead then
@@ -109,13 +130,7 @@ local function complete_run_command(arg_lead, cmd_line, cursor_pos)
         return matches
 
     elseif is_environment_var then
-        -- If environment cache is empty, fill it
-        if environ_cache == nil then
-            fill_environ_cache()
-        end
-        if environ_cache == nil then
-            return {}
-        end
+        fill_environ_cache()
         -- Filter cached environment variables based on arg_lead
         local env_vars = {}
         for _, var in ipairs(environ_cache) do
@@ -132,8 +147,8 @@ local function complete_run_command(arg_lead, cmd_line, cursor_pos)
         local files = vim.fn.readdir(cwd)
         local matches = {}
         for _, file in ipairs(files) do
-            if file:sub(1, #arg_lead) == arg_lead then
-                table.insert(matches, file)
+            if file:sub(1, #lead) == lead then
+                table.insert(matches, escape_shell_word(file))
             end
         end
         return matches
@@ -154,10 +169,13 @@ local running_job = nil
 local command_start_time = nil  -- Track when command started
 local run_sequence = 0 -- Incremented each run to ignore stale callbacks
 
-local ansi_namespace = nil
+-- Extmark namespace for ANSI colors and locations (the same id after a reload)
+local ANSI_NS = vim.api.nvim_create_namespace('ansi_hl')
 local current_ansi_state = nil  -- Tracks ANSI state across lines (table: {fg,bg,attrs})
-local current_line_position = 1
-local current_line_hls = {}  -- Highlight group per byte of the line being written
+local current_line_position = 1  -- Write cursor, as an index into current_line_cells
+local current_line_cells = {}  -- One character (string) per cell of the line being written
+local current_line_hls = {}  -- Highlight group per cell of the line being written
+local pending_input = ''  -- Incomplete escape sequence or character at the end of the last chunk
 local navigation_marks = {}  -- Maps line numbers to file locations
 local run_cwd = nil  -- Directory the current command was started in
 local run_buffer = nil  -- Output buffer of the current run
@@ -166,58 +184,27 @@ local ansi_hl_cache = {}  -- Maps generated highlight group name -> highlight pr
 
 local is_windows = utils.is_windows
 
--- Location patterns, tried in order: the earliest match in a line wins, so more
--- specific patterns come first to win ties at the same start column.
+-- Number of header lines ('@ cwd' and '$ cmd') at the top of the output
+local HEADER_LINE_COUNT = 2
+
+-- Location patterns, matched at the start of each whitespace-separated word (after
+-- any leading quote or bracket) and tried in order, so more specific ones come first.
+-- Anchoring them keeps scanning linear in the line length.
 local LOCATION_PATTERNS = {
-    '([^%s%(]+)%((%d+),(%d+)%)',  -- file(line,col)  (MSVC)
-    '([^%s%(]+)%((%d+)%)',        -- file(line)
-    '([^%s:]+):(%d+):(%d+)',      -- file:line:col
-    '([^%s:]+):(%d+)',            -- file:line
+    '^([^%(%)"\'<>%[%]]+)%((%d+),(%d+)%)',  -- file(line,col)  (MSVC)
+    '^([^%(%)"\'<>%[%]]+)%((%d+)%)',        -- file(line)
+    '^([^:%(%)"\'<>%[%]]+):(%d+):(%d+)',    -- file:line:col
+    '^([^:%(%)"\'<>%[%]]+):(%d+)',          -- file:line
 }
 if is_windows then
     -- Keep the drive letter, which the patterns above would split on ':'
-    table.insert(LOCATION_PATTERNS, 1, '(%a:[^%s:]+):(%d+):(%d+)')
-    table.insert(LOCATION_PATTERNS, 2, '(%a:[^%s:]+):(%d+)')
-end
-
---- Ensure extmark namespace exists even after module reloads
-local function ensure_ansi_namespace()
-    if type(ansi_namespace) ~= 'number' then
-        ansi_namespace = vim.api.nvim_create_namespace('ansi_hl')
-    end
-    return ansi_namespace
+    table.insert(LOCATION_PATTERNS, 1, '^(%a:[^:%(%)"\'<>%[%]]+):(%d+):(%d+)')
+    table.insert(LOCATION_PATTERNS, 2, '^(%a:[^:%(%)"\'<>%[%]]+):(%d+)')
 end
 
 -- ============================================================================
 -- Utility Functions
 -- ============================================================================
--- Debug capture: set to true to write raw incoming chunks to a temp file for inspection
-local function pretty_chunk(c)
-    local out = ''
-    for i = 1, #c do
-        local byte = c:byte(i)
-        if byte >= 32 and byte <= 126 then
-            out = out .. string.char(byte)
-        else
-            out = out .. string.format('<%d>', byte)
-        end
-    end
-    return out
-end
-
-local function debug_capture(chunks)
-    local debug_log_path = vim.fn.expand('%:p:h') .. '/run_command_debug.log'
-    local ok, f = pcall(io.open, debug_log_path, 'a')
-    if not ok or not f then return end
-    f:write('---- CHUNK BATCH ----\n')
-    for i, c in ipairs(chunks) do
-        f:write(string.format('[%d] LEN=%d: ', i, #c or 0))
-        f:write(pretty_chunk(c))
-        f:write('\n')
-    end
-    f:write('\n')
-    f:close()
-end
 
 --- Format elapsed time in milliseconds to a readable string
 local function format_elapsed_time(ms)
@@ -240,6 +227,13 @@ local function kill_running_job()
     end
 end
 
+--- Start a new, empty line being written
+local function reset_line()
+    current_line_position = 1
+    current_line_cells = {}
+    current_line_hls = {}
+end
+
 --- Recompile - run the last command again
 local function rerun_last_command()
     if run_command and last_command then
@@ -249,77 +243,71 @@ local function rerun_last_command()
     end
 end
 
+-- Standard and bright colors, indexed by the offset from 30/40 and 90/100
+local SGR_BASE = { '#000000', '#800000', '#008000', '#808000', '#000080', '#800080', '#008080', '#c0c0c0' }
+local SGR_BRIGHT = { '#808080', '#ff0000', '#00ff00', '#ffff00', '#0000ff', '#ff00ff', '#00ffff', '#ffffff' }
+
+local function clamp(v, a, b) v = tonumber(v) or 0 if v < a then return a end if v > b then return b end return v end
+
+local function xterm256_to_hex(n)
+    n = clamp(n, 0, 255)
+    if n < 8 then
+        return SGR_BASE[n + 1]
+    elseif n < 16 then
+        return SGR_BRIGHT[n - 7]
+    elseif n <= 231 then
+        local v = n - 16
+        local r = math.floor(v / 36)
+        local g = math.floor((v % 36) / 6)
+        local b = v % 6
+        local function level(x) return x == 0 and 0 or 55 + x * 40 end
+        return string.format('#%02x%02x%02x', level(r), level(g), level(b))
+    else
+        local gray = 8 + (n - 232) * 10
+        return string.format('#%02x%02x%02x', gray, gray, gray)
+    end
+end
+
+local function reset_sgr_state()
+    return { fg = nil, bg = nil, attrs = { bold = false, italic = false, underline = false, strikethrough = false } }
+end
+
 --- Map ANSI color codes to highlight groups
 local function parse_sgr_parts(params, state)
     -- params: string like '34' or '1;38;5;196'
     -- state: existing table to mutate (or nil)
-    local function clamp(v, a, b) v = tonumber(v) or 0 if v < a then return a end if v > b then return b end return v end
-    local function xterm256_to_hex(n)
-        n = tonumber(n) or 0
-        if n < 0 then n = 0 end
-        if n > 255 then n = 255 end
-        local ansi16 = {
-            {0,0,0},{128,0,0},{0,128,0},{128,128,0},{0,0,128},{128,0,128},{0,128,128},{192,192,192},
-            {128,128,128},{255,0,0},{0,255,0},{255,255,0},{0,0,255},{255,0,255},{0,255,255},{255,255,255}
-        }
-        if n < 16 then
-            local c = ansi16[n+1]
-            return string.format('#%02x%02x%02x', c[1], c[2], c[3])
-        elseif n >= 16 and n <= 231 then
-            local v = n - 16
-            local r = math.floor(v / 36)
-            local g = math.floor((v % 36) / 6)
-            local b = v % 6
-            local function level(x) return x == 0 and 0 or 55 + x * 40 end
-            return string.format('#%02x%02x%02x', level(r), level(g), level(b))
-        else
-            local gray = 8 + (n - 232) * 10
-            return string.format('#%02x%02x%02x', gray, gray, gray)
-        end
-    end
-
     local parts = vim.split(params or '', ';')
-    if not state then state = { fg = nil, bg = nil, attrs = { bold = false, italic = false, underline = false, strikethrough = false } } end
+    if not state then state = reset_sgr_state() end
 
     local i = 1
     while i <= #parts do
-        local p = parts[i]
-        if p == '' then
-            -- reset
-            state = { fg = nil, bg = nil, attrs = { bold = false, italic = false, underline = false, strikethrough = false } }
-        elseif p == '0' then
-            state = { fg = nil, bg = nil, attrs = { bold = false, italic = false, underline = false, strikethrough = false } }
-        elseif p == '1' then state.attrs.bold = true
-        elseif p == '3' then state.attrs.italic = true
-        elseif p == '4' then state.attrs.underline = true
-        elseif p == '9' then state.attrs.strikethrough = true
-        elseif p == '22' then state.attrs.bold = false
-        elseif p == '23' then state.attrs.italic = false
-        elseif p == '24' then state.attrs.underline = false
-        elseif p == '29' then state.attrs.strikethrough = false
-        elseif p == '39' then state.fg = nil
-        elseif p == '49' then state.bg = nil
-        elseif tonumber(p) and tonumber(p) >= 30 and tonumber(p) <= 37 then
-            local base = {['30']='#000000',['31']='#800000',['32']='#008000',['33']='#808000',['34']='#000080',['35']='#800080',['36']='#008080',['37']='#c0c0c0'}
-            state.fg = base[p]
-        elseif tonumber(p) and tonumber(p) >= 90 and tonumber(p) <= 97 then
-            local b2 = {['90']='#808080',['91']='#ff0000',['92']='#00ff00',['93']='#ffff00',['94']='#0000ff',['95']='#ff00ff',['96']='#00ffff',['97']='#ffffff'}
-            state.fg = b2[p]
-        elseif tonumber(p) and tonumber(p) >= 40 and tonumber(p) <= 47 then
-            local base_bg = {['40']='#000000',['41']='#800000',['42']='#008000',['43']='#808000',['44']='#000080',['45']='#800080',['46']='#008080',['47']='#c0c0c0'}
-            state.bg = base_bg[p]
-        elseif tonumber(p) and tonumber(p) >= 100 and tonumber(p) <= 107 then
-            local bg2 = {['100']='#808080',['101']='#ff0000',['102']='#00ff00',['103']='#ffff00',['104']='#0000ff',['105']='#ff00ff',['106']='#00ffff',['107']='#ffffff'}
-            state.bg = bg2[p]
-        elseif p == '38' or p == '48' then
-            local is_fg = p == '38'
-            local mode = parts[i+1]
-            if mode == '5' then
+        -- Compare numerically: tools write leading zeros ('01;31', '00'), and an
+        -- empty parameter means 0
+        local p = parts[i] == '' and 0 or tonumber(parts[i])
+        if p == 0 then state = reset_sgr_state()
+        elseif p == 1 then state.attrs.bold = true
+        elseif p == 3 then state.attrs.italic = true
+        elseif p == 4 then state.attrs.underline = true
+        elseif p == 9 then state.attrs.strikethrough = true
+        elseif p == 22 then state.attrs.bold = false
+        elseif p == 23 then state.attrs.italic = false
+        elseif p == 24 then state.attrs.underline = false
+        elseif p == 29 then state.attrs.strikethrough = false
+        elseif p == 39 then state.fg = nil
+        elseif p == 49 then state.bg = nil
+        elseif p and p >= 30 and p <= 37 then state.fg = SGR_BASE[p - 29]
+        elseif p and p >= 90 and p <= 97 then state.fg = SGR_BRIGHT[p - 89]
+        elseif p and p >= 40 and p <= 47 then state.bg = SGR_BASE[p - 39]
+        elseif p and p >= 100 and p <= 107 then state.bg = SGR_BRIGHT[p - 99]
+        elseif p == 38 or p == 48 then
+            local is_fg = p == 38
+            local mode = tonumber(parts[i+1])
+            if mode == 5 then
                 local n = tonumber(parts[i+2]) or 0
                 local hex = xterm256_to_hex(n)
                 if is_fg then state.fg = hex else state.bg = hex end
                 i = i + 2
-            elseif mode == '2' then
+            elseif mode == 2 then
                 local r = clamp(parts[i+2], 0, 255)
                 local g = clamp(parts[i+3], 0, 255)
                 local b = clamp(parts[i+4], 0, 255)
@@ -335,17 +323,9 @@ local function parse_sgr_parts(params, state)
 end
 
 
-local function get_ansi_highlight(code_or_state)
-    -- Accept either an SGR param string or a state table
-    local state = nil
-    if type(code_or_state) == 'table' then
-        state = code_or_state
-    else
-        state = parse_sgr_parts(code_or_state, nil)
-    end
-
-    if not state then return nil end
-    local fg, bg, attrs = state.fg, state.bg, state.attrs or {}
+--- Highlight group for an SGR state table (from parse_sgr_parts), or nil if unstyled
+local function get_ansi_highlight(state)
+    local fg, bg, attrs = state.fg, state.bg, state.attrs
     if not fg and not bg and not (attrs.bold or attrs.italic or attrs.underline or attrs.strikethrough) then
         return nil
     end
@@ -408,139 +388,148 @@ vim.api.nvim_create_autocmd('ColorScheme', {
 
 --- Search for file:line or file:line:col patterns and set navigation marks
 local function search_locations(line, line_num, buffer)
-    local ns_id = ensure_ansi_namespace()
-
     -- The line may be re-parsed as more of it arrives; the first readable location wins
     navigation_marks[line_num] = nil
+    -- Every pattern has a ':' or '(' followed by the line number; most lines have none
+    if not line:find('[:(]%d') then return end
 
-    -- Next match of each pattern at or after pos ({ s, e, file, line, col }, or false
-    -- once a pattern has no more matches), so each pattern scans the line about once.
-    local next_match = {}
+    for word_start, word in line:gmatch('()(%S+)') do
+        -- Skip quotes and brackets around the location: "foo.c:3", (foo.c:2:3), [foo.c:1]
+        local skip = #word:match('^["\'`(<%[{]*')
+        local s, e, file, lineno, colno
+        for _, pattern in ipairs(LOCATION_PATTERNS) do
+            s, e, file, lineno, colno = word:find(pattern, skip + 1)
+            if s then break end
+        end
+        if s then
+            s, e = word_start + s - 1, word_start + e - 1
 
-    local pos = 1
-    while pos <= #line do
-        local best
-        for k, pattern in ipairs(LOCATION_PATTERNS) do
-            local m = next_match[k]
-            if m == nil or (m and m[1] < pos) then
-                m = { line:find(pattern, pos) }
-                m = m[1] and m or false
-                next_match[k] = m
+            -- Resolve relative paths against the directory the command was started in,
+            -- not whatever cwd happens to be current when the output arrives. Build logs
+            -- repeat the same paths a lot, so cache the result (including misses).
+            local abs_path = resolved_paths[file]
+            if abs_path == nil then
+                local full = vim.fn.isabsolutepath(file) == 1 and file or vim.fs.joinpath(run_cwd, file)
+                full = vim.fn.simplify(full)
+                abs_path = vim.fn.filereadable(full) == 1 and full or false
+                resolved_paths[file] = abs_path
             end
-            if m and (not best or m[1] < best[1]) then
-                best = m
+            if abs_path then
+                navigation_marks[line_num] = navigation_marks[line_num] or {
+                    file = abs_path,
+                    line = tonumber(lineno),
+                    -- 1-based column as reported by the tool, converted when jumping
+                    col = tonumber(colno),
+                }
+                -- Highlight the file:line[:col] pattern (0-based column indexing)
+                pcall(vim.api.nvim_buf_set_extmark, buffer, ANSI_NS, line_num, s - 1, {
+                    end_col = e,
+                    hl_group = 'Directory',
+                })
             end
         end
-
-        if not best then break; end
-        local s, e, file, lineno, colno = unpack(best)
-
-        -- Resolve relative paths against the directory the command was started in,
-        -- not whatever cwd happens to be current when the output arrives. Build logs
-        -- repeat the same paths a lot, so cache the result (including misses).
-        local abs_path = resolved_paths[file]
-        if abs_path == nil then
-            local full = vim.fn.isabsolutepath(file) == 1 and file or vim.fs.joinpath(run_cwd, file)
-            full = vim.fn.simplify(full)
-            abs_path = vim.fn.filereadable(full) == 1 and full or false
-            resolved_paths[file] = abs_path
-        end
-        if abs_path then
-            navigation_marks[line_num] = navigation_marks[line_num] or {
-                file = abs_path,
-                line = tonumber(lineno),
-                -- Tools report 1-based columns; nvim cursor columns are 0-based
-                col = colno and math.max(0, tonumber(colno) - 1) or 0
-            }
-            -- Highlight the file:line[:col] pattern (0-based column indexing)
-            -- Clamp extmark columns to the actual line length to avoid nvim errors
-            local line_len = #line
-            local start_col = math.max(0, s - 1)
-            local end_col = math.min(line_len, e)
-            if end_col <= start_col then
-                end_col = math.min(line_len, start_col + 1)
-            end
-            pcall(vim.api.nvim_buf_set_extmark, buffer, ns_id, line_num, start_col, {
-                end_col = end_col,
-                hl_group = 'Directory',
-            })
-        end
-        pos = e + 1
     end
 end
 
---- Parse terminal control sequences (SGR/CSI/OSC/CR) and apply highlighting
-local function handle_chunk(input, buffer)
+-- Longest incomplete escape sequence kept for the next chunk. Anything longer is
+-- treated as malformed, so a stray ESC can't hold back the rest of the output.
+local MAX_PENDING_LENGTH = 4096
+
+--- Parse terminal control sequences (SGR/CSI/OSC/CR/BS) and apply highlighting.
+--- is_complete is true when the chunk ends its line. Otherwise an escape sequence or
+--- character cut off at the end is kept in pending_input for the next chunk.
+local function handle_chunk(input, buffer, is_complete)
+    input = pending_input .. input
+    pending_input = ''
     if #input == 0 then return end
+    -- Neovim delivers NUL bytes as '\n' inside a line; put the NUL back (shown as ^@)
+    input = input:gsub('\n', '\0')
 
-    -- Build a byte array for existing current line content. Highlights are tracked
-    -- per byte in current_line_hls (kept across chunks) so that rewriting the line,
-    -- carriage-return overwrites and erases all keep colors consistent.
-    local current_line = (utils.get_buffer_lines(buffer, -2, -1) or {})[1] or ''
-    local out_bytes = {}
-    for p = 1, #current_line do out_bytes[#out_bytes + 1] = current_line:byte(p) end
-
-    local ns_id = ensure_ansi_namespace()
+    -- The line being written is kept as cells, one character each, with a highlight
+    -- group per cell (both kept across chunks), so that carriage-return overwrites,
+    -- backspaces and erases work per character and keep colors consistent.
+    local cells, hls = current_line_cells, current_line_hls
     local current_state = current_ansi_state
     local current_hl = current_state and get_ansi_highlight(current_state) or nil
 
     -- Pad the line with unstyled spaces up to (but not including) column col
     local function pad_to(col)
-        for k = #out_bytes + 1, col - 1 do
-            out_bytes[k] = 32
-            current_line_hls[k] = nil
+        for k = #cells + 1, col - 1 do
+            cells[k] = ' '
+            hls[k] = nil
         end
     end
 
+    -- Keep the input from byte i on for the next chunk, if it may still be completed
+    local function defer(i)
+        if is_complete or #input - i >= MAX_PENDING_LENGTH then return false end
+        pending_input = input:sub(i)
+        return true
+    end
+
+    local n = #input
     local i = 1
-    while i <= #input do
+    while i <= n do
         local b = input:byte(i)
         -- Carriage return: move write cursor to start of line
         if b == 13 then
             current_line_position = 1
             i = i + 1
 
+        elseif b == 8 then
+            -- Backspace: move write cursor back one character
+            current_line_position = math.max(1, current_line_position - 1)
+            i = i + 1
+
+        elseif b == 7 then
+            -- BEL: drop it
+            i = i + 1
+
         elseif b == 27 then
             -- Escape: parse control sequence
             local next_ch = input:sub(i + 1, i + 1)
-            if next_ch == '[' then
+            if next_ch == '' then
+                -- Lone ESC at the end of the chunk
+                if defer(i) then break end
+                i = i + 1
+            elseif next_ch == '[' then
                 -- CSI sequence: collect params up to final byte
                 local j = i + 2
-                while j <= #input and not (input:byte(j) >= 64 and input:byte(j) <= 126) do
+                while j <= n and not (input:byte(j) >= 64 and input:byte(j) <= 126) do
                     j = j + 1
                 end
-                if j <= #input then
+                if j <= n then
                     local final = input:sub(j, j)
                     local params = input:sub(i + 2, j - 1)
-                    if final == 'm' then
+                    if final == 'm' and (params == '' or params == '0') then
+                        -- SGR reset, by far the most common one
+                        current_state = nil
+                        current_hl = nil
+                    elseif final == 'm' then
                         -- SGR - styling change. Merge sequential SGR codes into a single state
-                        local code = params or ''
-                        if code == '' or code == '0' then
-                            current_state = nil
-                            current_hl = nil
-                        else
-                            current_state = parse_sgr_parts(code, current_state)
-                            current_hl = get_ansi_highlight(current_state)
-                        end
+                        current_state = parse_sgr_parts(params, current_state)
+                        current_hl = get_ansi_highlight(current_state)
                     elseif final == 'K' then
                         -- EL (Erase in Line) handling; the cursor never moves
-                        local n = tonumber(params) or 0
-                        if n == 0 then
+                        local mode = tonumber(params) or 0
+                        if mode == 0 then
                             -- erase from cursor to end of line
-                            for idx = #out_bytes, current_line_position, -1 do
-                                out_bytes[idx] = nil
-                                current_line_hls[idx] = nil
+                            for idx = #cells, current_line_position, -1 do
+                                cells[idx] = nil
+                                hls[idx] = nil
                             end
-                        elseif n == 1 then
+                        elseif mode == 1 then
                             -- erase from start of line through cursor (blank it out)
-                            for idx = 1, math.min(current_line_position, #out_bytes) do
-                                out_bytes[idx] = 32
-                                current_line_hls[idx] = nil
+                            for idx = 1, math.min(current_line_position, #cells) do
+                                cells[idx] = ' '
+                                hls[idx] = nil
                             end
-                        elseif n == 2 then
+                        elseif mode == 2 then
                             -- erase entire line
-                            out_bytes = {}
-                            current_line_hls = {}
+                            for idx = #cells, 1, -1 do
+                                cells[idx] = nil
+                                hls[idx] = nil
+                            end
                         end
                     elseif final == 'J' then
                         -- ED (Erase Display) handling (ignore it for now)
@@ -549,82 +538,105 @@ local function handle_chunk(input, buffer)
                         current_line_position = math.max(1, tonumber(params) or 1)
                         pad_to(current_line_position)
                     elseif final == 'H' or final == 'f' then
-                        -- Cursor position: move to specified column (params = 'row;col' or 'row')
-                        local row_str, col_str = params:match('(%d*);?(%d*)')
-                        local col = tonumber(col_str) or tonumber(row_str) or 1
-                        current_line_position = math.max(1, col)
+                        -- Cursor position (params = 'row;col', 'row' or ''): only the
+                        -- column is used, since output is written one line at a time
+                        current_line_position = math.max(1, tonumber(params:match(';(%d+)')) or 1)
                         pad_to(current_line_position)
                     elseif final == 'l' or final == 'h' then
                         -- Private-mode set/reset (eg. ?25l / ?25h for cursor visibility) - ignore
                     end
-                    j = j + 1
-                    i = j
+                    i = j + 1
+                elseif defer(i) then
+                    break
                 else
                     -- Malformed CSI: skip ESC
                     i = i + 1
                 end
             elseif next_ch == ']' then
-                -- OSC sequence: skip until BEL (7) or ESC '\' terminator
-                local j2 = i + 2
-                while j2 <= #input do
-                    local cb = input:byte(j2)
+                -- OSC sequence (titles, OSC 8 hyperlinks): skip until BEL (7) or ESC '\'
+                local j = i + 2
+                local stop = nil
+                while j <= n do
+                    local cb = input:byte(j)
                     if cb == 7 then
-                        j2 = j2 + 1
+                        stop = j
                         break
                     end
-                    if cb == 27 and input:sub(j2 + 1, j2 + 1) == '\\' then
-                        j2 = j2 + 2
+                    if cb == 27 and input:sub(j + 1, j + 1) == '\\' then
+                        stop = j + 1
                         break
                     end
-                    j2 = j2 + 1
+                    j = j + 1
                 end
-                i = j2
+                if stop then
+                    i = stop + 1
+                elseif defer(i) then
+                    break
+                else
+                    -- Unterminated OSC: drop the rest of the line
+                    i = n + 1
+                end
+            elseif next_ch:match('[()*+#]') then
+                -- Three-byte sequences: character set designation (ESC ( B, as written by
+                -- tput sgr0) and ESC # n
+                if i + 2 <= n then
+                    i = i + 3
+                elseif defer(i) then
+                    break
+                else
+                    i = n + 1
+                end
             else
-                -- Unknown ESC sequence: skip ESC
-                i = i + 1
+                -- Other two-byte sequences (ESC 7, ESC 8, ESC =, ESC >, ...): skip them
+                i = i + 2
             end
         else
-            -- Regular byte: append/overwrite at current position
-            out_bytes[current_line_position] = b
-            current_line_hls[current_line_position] = current_hl
+            -- Regular character: append/overwrite at current position. Take a whole
+            -- UTF-8 sequence; invalid bytes become a cell of their own.
+            local len = b >= 240 and 4 or b >= 224 and 3 or b >= 192 and 2 or 1
+            if len > 1 and not input:sub(i + 1, i + len - 1):match('^[\128-\191]*$') then
+                len = 1
+            elseif i + len - 1 > n and defer(i) then
+                break
+            end
+            cells[current_line_position] = input:sub(i, i + len - 1)
+            hls[current_line_position] = current_hl
             current_line_position = current_line_position + 1
-            i = i + 1
+            i = i + len
         end
     end
 
-    -- Assemble final line from bytes
-    local final_line = ''
-    if #out_bytes > 0 then
-        local parts = {}
-        for idx = 1, #out_bytes do
-            parts[idx] = string.char(out_bytes[idx])
-        end
-        final_line = table.concat(parts)
-    end
+    local final_line = table.concat(cells)
     utils.set_buffer_lines(buffer, -2, -1, { final_line })
 
     -- Re-apply highlight extmarks for the whole line, merging runs of equal groups.
     -- Rewriting the line collapses its old extmarks, so clear them first.
     local line_num = utils.get_buffer_line_count(buffer) - 1
-    pcall(vim.api.nvim_buf_clear_namespace, buffer, ns_id, line_num, line_num + 1)
+    pcall(vim.api.nvim_buf_clear_namespace, buffer, ANSI_NS, line_num, line_num + 1)
     local idx = 1
-    while idx <= #out_bytes do
-        local hl = current_line_hls[idx]
-        local stop = idx
-        while stop + 1 <= #out_bytes and current_line_hls[stop + 1] == hl do
-            stop = stop + 1
+    local byte_col = 0  -- 0-based byte column of cell idx
+    while idx <= #cells do
+        local hl = hls[idx]
+        local start_col = byte_col
+        byte_col = byte_col + #cells[idx]
+        while idx + 1 <= #cells and hls[idx + 1] == hl do
+            idx = idx + 1
+            byte_col = byte_col + #cells[idx]
         end
         if hl then
-            pcall(vim.api.nvim_buf_set_extmark, buffer, ns_id, line_num, idx - 1, {
-                end_col = stop,
+            pcall(vim.api.nvim_buf_set_extmark, buffer, ANSI_NS, line_num, start_col, {
+                end_col = byte_col,
                 hl_group = hl,
             })
         end
-        idx = stop + 1
+        idx = idx + 1
     end
 
-    -- Search for file:line patterns and set navigation marks
-    search_locations(final_line, line_num, buffer)
+    -- Search for file:line patterns and set navigation marks (not in the header,
+    -- which echoes the command)
+    if line_num >= HEADER_LINE_COUNT then
+        search_locations(final_line, line_num, buffer)
+    end
 
     -- Save ANSI state back (store state table)
     current_ansi_state = current_state
@@ -638,12 +650,6 @@ end
 
 --- Initialize syntax highlighting for output buffer
 local function initialize_syntax_highlighting(buffer)
-    -- Reset ANSI state for new command
-    current_ansi_state = nil
-    -- Ensure namespace exists (important when state was reset by a reload)
-    ansi_namespace = ensure_ansi_namespace()
-
-    -- Setup syntax highlighting for this buffer
     vim.api.nvim_buf_call(buffer, function()
         vim.cmd([[
           syntax clear
@@ -656,34 +662,29 @@ local function initialize_syntax_highlighting(buffer)
           syntax match RunWarning /\c\<warning\>\|\c\<warn\>/
         ]])
         define_syntax_links()
-
-        -- Generate ANSI color highlights programmatically
-        local colors = {'Red', 'Green', 'Yellow', 'Blue', 'Magenta', 'Cyan', 'White'}
-        local styles = {
-            {prefix = '', attrs = ''},
-            {prefix = 'Bold', attrs = 'cterm=bold gui=bold'},
-            {prefix = 'Italic', attrs = 'cterm=italic gui=italic'},
-            {prefix = 'Underline', attrs = 'cterm=underline gui=underline'},
-            {prefix = 'Strike', attrs = 'cterm=strikethrough gui=strikethrough'},
-        }
-
-        for _, color in ipairs(colors) do
-            for _, style in ipairs(styles) do
-                local hl_name = 'Ansi' .. style.prefix .. color
-                local ctermfg = ({Red=1, Green=2, Yellow=3, Blue=4, Magenta=5, Cyan=6, White=7})[color]
-                local gui_color = string.lower(color)
-                vim.cmd(string.format('highlight %s ctermfg=%d %s guifg=%s',
-                    hl_name, ctermfg, style.attrs, gui_color))
-            end
-        end
-
-        -- Standalone style highlights
-        vim.cmd('highlight AnsiBold cterm=bold gui=bold')
-        vim.cmd('highlight AnsiItalic cterm=italic gui=italic')
-        vim.cmd('highlight AnsiUnderline cterm=underline gui=underline')
-        vim.cmd('highlight AnsiStrike cterm=strikethrough gui=strikethrough')
     end)
+end
 
+--- 0-based byte column for a navigation mark, in the current buffer.
+--- Tools report 1-based columns. GCC counts display columns (a tab is 8 wide), which
+--- only differ from byte columns on lines with tabs or multibyte characters, so
+--- columns are converted as display columns only on lines containing tabs.
+local function location_byte_col(mark)
+    if not mark.col then return 0 end
+    local text = vim.api.nvim_buf_get_lines(0, mark.line - 1, mark.line, false)[1] or ''
+    if not text:find('\t', 1, true) then
+        return math.max(0, mark.col - 1)
+    end
+    local vcol = 1  -- display column of the character at byte i
+    local i = 1
+    while i <= #text do
+        local ch = text:sub(i, i + vim.str_utf_end(text, i))
+        local width = ch == '\t' and (8 - (vcol - 1) % 8) or vim.fn.strdisplaywidth(ch)
+        if vcol + width > mark.col then break end
+        vcol = vcol + width
+        i = i + #ch
+    end
+    return i - 1
 end
 
 -- Initialize keymap for new buffer
@@ -719,75 +720,62 @@ local function initialize_keymaps(buffer)
 
         -- :edit reuses an existing buffer (loading it if needed) or opens the file
         vim.cmd('edit ' .. vim.fn.fnameescape(mark.file))
-        utils.set_cursor_position(target_win, mark.line, mark.col)
+        utils.set_cursor_position(target_win, mark.line, location_byte_col(mark))
     end, { buffer = buffer, nowait = true, desc = 'Go to file:line:col under cursor' })
 
-    -- Navigate to next location mark
-    vim.keymap.set('n', ']', function()
+    -- Navigate to the next (dir = 1) or previous (dir = -1) location mark
+    local function jump_mark(dir)
         local window = utils.get_current_window()
         local cur_line = utils.get_cursor_position(window).line - 1
-        local next_line = nil
+        local target = nil
         for line_num, _ in pairs(navigation_marks) do
-            if line_num > cur_line and (next_line == nil or line_num < next_line) then
-                next_line = line_num
+            -- Compare signed distances, so the nearest mark in direction dir wins
+            if (line_num - cur_line) * dir > 0 and (target == nil or (line_num - target) * dir < 0) then
+                target = line_num
             end
         end
-        if next_line then
-            utils.set_cursor_position(window, next_line + 1, 0)
+        if target then
+            utils.set_cursor_position(window, target + 1, 0)
         end
-    end, { buffer = buffer, nowait = true, desc = 'Go to next location mark' })
-
-    -- Navigate to previous location mark
-    vim.keymap.set('n', '[', function()
-        local window = utils.get_current_window()
-        local cur_line = utils.get_cursor_position(window).line - 1
-        local prev_line = nil
-        for line_num, _ in pairs(navigation_marks) do
-            if line_num < cur_line and (prev_line == nil or line_num > prev_line) then
-                prev_line = line_num
-            end
-        end
-        if prev_line then
-            utils.set_cursor_position(window, prev_line + 1, 0)
-        end
-    end, { buffer = buffer, nowait = true, desc = 'Go to previous location mark' })
+    end
+    vim.keymap.set('n', ']', function() jump_mark(1) end,
+        { buffer = buffer, nowait = true, desc = 'Go to next location mark' })
+    vim.keymap.set('n', '[', function() jump_mark(-1) end,
+        { buffer = buffer, nowait = true, desc = 'Go to previous location mark' })
 
     -- Keymap to re-run last command
-    vim.keymap.set('n', 'r', function()
-        rerun_last_command()
-    end, { buffer = buffer, nowait = true, desc = 'Re-run last command' })
+    vim.keymap.set('n', 'r', rerun_last_command, { buffer = buffer, nowait = true, desc = 'Re-run last command' })
 
     -- Keymap to kill running command
-    vim.keymap.set('n', 'k', function()
-        kill_running_job()
-    end, { buffer = buffer, nowait = true, desc = 'Kill running command' })
+    vim.keymap.set('n', '<C-c>', kill_running_job, { buffer = buffer, nowait = true, desc = 'Kill running command' })
 end
 
 --- Initialize or clear the output buffer
 local function initialize_buffer()
-    -- Reset buffer content if it already exists to preserve window and extmark state
-    local buffer = utils.find_buffer_by_name(BUFFER_NAME)
-    -- A buffer closed with :bdelete still exists but is unloaded (and lost its
-    -- syntax setup), so throw it away and start fresh
-    if buffer and not utils.is_buffer_valid(buffer) then
-        pcall(utils.remove_buffer, buffer)
-        buffer = nil
-    end
-    if buffer then
+    -- Reuse the buffer if it still exists, to preserve its windows. One closed with
+    -- :bdelete is unloaded (and lost its syntax setup), so it is replaced by a new one.
+    local buffer, created = utils.get_or_create_scratch_buffer(
+        BUFFER_NAME, utils.find_buffer_by_name(BUFFER_NAME), false)
+    if not created then
         utils.reset_buffer_content(buffer)
-        pcall(vim.api.nvim_buf_clear_namespace, buffer, ensure_ansi_namespace(), 0, -1)
+        pcall(vim.api.nvim_buf_clear_namespace, buffer, ANSI_NS, 0, -1)
     else
-        -- Otherwise create a new buffer
-        buffer = utils.create_scratch_buffer(BUFFER_NAME, false) -- modifiable = false
-        -- Setup syntax highlighting and keymaps for the buffer
         initialize_syntax_highlighting(buffer)
+        -- Don't leave the command running unseen once its output is gone (q, :bd, :bw)
+        vim.api.nvim_create_autocmd({ 'BufDelete', 'BufWipeout' }, {
+            buffer = buffer,
+            callback = function()
+                if buffer == run_buffer then kill_running_job() end
+            end,
+        })
     end
     return buffer
 end
 
 
---- Update buffer with new output lines from run number `seq`
-local function update_output(data, seq)
+--- Update buffer with new output lines from run number `seq`.
+--- reset_colors resets the ANSI state first (for the trailer written at exit).
+local function update_output(data, seq, reset_colors)
     if not data or #data == 0 then return end
 
     vim.schedule(function()
@@ -795,20 +783,19 @@ local function update_output(data, seq)
         if seq ~= run_sequence then return end
         local buffer = run_buffer
         if not buffer or not utils.is_buffer_valid(buffer) then return end
+        if reset_colors then current_ansi_state = nil end
 
-        -- Find the window displaying this buffer, if any, to manage auto-scrolling
-        local window = utils.find_window_by_buffer(buffer)
-        local at_bottom = true
-        if window then
-            local curr_line = utils.get_cursor_position(window).line
-            local line_count = utils.get_buffer_line_count(buffer)
-            -- Only follow output when the cursor is on the last line. A freshly reset
-            -- buffer has a single line, so new runs still start out following.
-            at_bottom = curr_line == line_count
+        -- Each window showing this buffer follows the output only while its cursor is
+        -- on the last line. A freshly reset buffer has a single line, so new runs
+        -- still start out following.
+        local line_count = utils.get_buffer_line_count(buffer)
+        local following = {}
+        for _, window in ipairs(vim.fn.win_findbuf(buffer)) do
+            if utils.get_cursor_position(window).line == line_count then
+                table.insert(following, window)
+            end
         end
 
-        -- Capture raw chunks for debugging if needed
-        -- debug_capture(data)
         -- stdout and stderr are not emitted immediately, they are accumulated and emitted
         -- in batches upon flush. Neovim emits a different chunk for each line emitted into
         -- stack prior to flush.
@@ -817,17 +804,17 @@ local function update_output(data, seq)
             -- so we can safely append a new empty line for the next chunk.
             if idx > 1 then
                 utils.set_buffer_lines(buffer, -1, -1, { '' })
-                current_line_position = 1
-                current_line_hls = {}
+                reset_line()
             end
-            -- Process the chunk to handle ANSI codes and update buffer content
-            handle_chunk(chunk, buffer)
+            -- Process the chunk to handle ANSI codes and update buffer content.
+            -- Every chunk but the last ends its line.
+            handle_chunk(chunk, buffer, idx < #data)
         end
 
-        -- If window is displayed, auto-scroll to bottom if cursor was already at the end
+        -- Auto-scroll to bottom the windows whose cursor was already at the end
         -- This allows users to scroll up and read output without being forced to the bottom on every update
-        if window and at_bottom then
-            local line_count = utils.get_buffer_line_count(buffer)
+        line_count = utils.get_buffer_line_count(buffer)
+        for _, window in ipairs(following) do
             utils.set_cursor_position(window, line_count, 0)
         end
     end)
@@ -842,7 +829,7 @@ local function on_complete(seq, exit_code)
         '----------------------------------------',
         string.format('Process exited with code %d', exit_code),
         string.format('Elapsed time: %s', elapsed_str)
-    }, seq)
+    }, seq, true)
     running_job = nil
 end
 
@@ -874,8 +861,8 @@ run_command = function(cmd)
     resolved_paths = {}
     run_cwd = vim.fn.getcwd()
     current_ansi_state = nil
-    current_line_position = 1
-    current_line_hls = {}
+    reset_line()
+    pending_input = ''
     -- Initially populate buffer with command info
     update_output({ '@ ' .. run_cwd, '$ ' .. cmd, '', ''}, this_run)
     -- Start async job
@@ -883,10 +870,12 @@ run_command = function(cmd)
         update_output(data, this_run)
     end
     local job_opts = {
-        -- Using tty mode on windows to avoid compatibility issues
-        tty = is_windows,
         -- Using pty on non-windows systems so tools think they're in a real terminal
+        -- (plain pipes on Windows to avoid compatibility issues)
         pty = not is_windows,
+        -- With a pty, git log, man, etc. would start a pager and wait for input forever.
+        -- env extends the inherited environment (clear_env is off).
+        env = not is_windows and { PAGER = 'cat', GIT_PAGER = 'cat', MANPAGER = 'cat' } or nil,
         on_stdout = on_output,
         on_stderr = on_output,
         on_exit = function(_, code)

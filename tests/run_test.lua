@@ -25,6 +25,9 @@ dir = vim.fn.resolve(dir)
 vim.fn.writefile({ 'line one of foo', 'line two of foo', 'line three of foo' }, dir .. '/foo.c')
 vim.fn.writefile({ 'p1', 'p2' }, dir .. '/foo.cpp')
 vim.fn.writefile({ 'o1', 'o2' }, dir .. '/other.txt')
+vim.fn.writefile({ '\tint x = 1;' }, dir .. '/tab.c')
+vim.fn.mkdir(dir .. '/my dir', 'p')
+vim.fn.writefile({}, dir .. '/my dir/a.txt')
 
 local ns = vim.api.nvim_create_namespace('ansi_hl')
 
@@ -230,6 +233,145 @@ test(':bdelete of the output buffer during a run', function()
     eq(vim.v.errmsg, '', 'errors')
     run('echo fresh')
     eq(out_lines()[4], 'fresh', 'next run output')
+end)
+
+test('a 50 KB line without spaces does not freeze the editor', function()
+    local start = vim.uv.hrtime()
+    run([[printf '%050000d foo.c:2\n' 0]])
+    local secs = (vim.uv.hrtime() - start) / 1e9
+    eq(secs < 3, true, string.format('finished within 3s (took %.1fs)', secs))
+    eq(#out_lines()[4], 50008, 'line length')
+    jump_first()
+    eq(current_file(), dir .. '/foo.c', 'file')
+    eq(cursor()[1], 2, 'line')
+end)
+
+test('NUL bytes in the output', function()
+    run([[printf 'a\000b\n']])
+    eq(out_lines()[4], 'a\0b', 'line with NUL')
+end)
+
+test('escape sequences and characters split across output callbacks', function()
+    run([[printf 'a\033'; sleep 0.3; printf '[31mred\033['; sleep 0.3; printf '0m \033]8;;http://x'; ]]
+        .. [[sleep 0.3; printf '/\033\\link\033]8;;\033\\\n\303'; sleep 0.3; printf '\251\n']])
+    eq(out_lines()[4], 'ared link', 'text')
+    eq(out_lines()[5], 'é', 'split character')
+    eq(ansi_marks(), { { row = 3, col = 1, end_col = 4, hl = 'Ansi_fg_800000' } }, 'highlights')
+end)
+
+test('pagers are disabled and the environment is kept', function()
+    run([[echo "$PAGER $GIT_PAGER $MANPAGER $HOME"]])
+    eq(out_lines()[4], 'cat cat cat ' .. vim.env.HOME, 'environment')
+end)
+
+test('q and :bwipeout kill the running command', function()
+    local marker = dir .. '/marker'
+    vim.cmd('Run sleep 0.5; touch marker')
+    vim.wait(100)
+    focus_run()
+    keys('q')
+    vim.wait(1000)
+    eq(vim.fn.filereadable(marker), 0, 'command still ran after q')
+
+    vim.cmd('Run sleep 0.5; touch marker')
+    vim.wait(100)
+    vim.cmd('bwipeout! ' .. run_buf())
+    vim.wait(1000)
+    eq(vim.fn.filereadable(marker), 0, 'command still ran after :bwipeout')
+end)
+
+test('SGR parameters with leading zeros', function()
+    -- GNU ls and GCC write 01;31 for bold red and 00 for reset
+    run([[printf '\033[01;31mA\033[00mB\033[1;0mC\n']])
+    eq(out_lines()[4], 'ABC', 'text')
+    eq(ansi_marks(), { { row = 3, col = 0, end_col = 1, hl = 'Ansi_fg_800000_Bold' } }, 'highlights')
+end)
+
+test('two-byte escape sequences are not printed', function()
+    run([[printf 'a\033(Bb\033''7c\033''8d\033=e\033>f\n']])
+    eq(out_lines()[4], 'abcdef', 'text')
+end)
+
+test('colors left open at the end do not paint the trailer', function()
+    run([[printf '\033[31mred\n']])
+    eq(ansi_marks(), { { row = 3, col = 0, end_col = 3, hl = 'Ansi_fg_800000' } }, 'highlights')
+end)
+
+test('the command header is not a location', function()
+    run('echo foo.c:2:1')
+    focus_run()
+    vim.api.nvim_win_set_cursor(0, { 1, 0 })
+    keys(']')
+    eq(cursor()[1], 4, 'line after ]')
+end)
+
+test('locations wrapped in punctuation', function()
+    for _, text in ipairs({ 'at fn (foo.c:2:3)', '"foo.c:2"', '[foo.c:2]', '<foo.c:2>' }) do
+        run([[echo ']] .. text .. [[']])
+        jump_first()
+        eq(current_file(), dir .. '/foo.c', 'file for ' .. text)
+        eq(cursor()[1], 2, 'line for ' .. text)
+        vim.cmd('edit ' .. vim.fn.fnameescape(dir .. '/other.txt'))
+    end
+end)
+
+test('~ path completion', function()
+    local home = vim.env.HOME
+    vim.env.HOME = dir
+    local ok, err = pcall(function()
+        eq(vim.tbl_contains(vim.fn.getcompletion('Run ls ~', 'cmdline'), '~/foo.c'), true, '~/foo.c offered for ~')
+        eq(vim.fn.getcompletion('Run ls ~/fo', 'cmdline'), { '~/foo.c', '~/foo.cpp' }, 'completions of ~/fo')
+    end)
+    vim.env.HOME = home
+    if not ok then error(err, 0) end
+end)
+
+test('completion escapes spaces in paths', function()
+    eq(vim.fn.getcompletion('Run ls ./my', 'cmdline'), { './my\\ dir/' }, 'directory')
+    eq(vim.fn.getcompletion('Run ls ./my\\ dir/', 'cmdline'), { './my\\ dir/a.txt' }, 'file in directory')
+    eq(vim.fn.getcompletion('Run ls my', 'cmdline'), { 'my\\ dir' }, 'cwd entry')
+end)
+
+test('command completion after && and with an abbreviated :Run', function()
+    eq(vim.tbl_contains(vim.fn.getcompletion('Run true && ec', 'cmdline'), 'echo'), true, 'after &&')
+    eq(vim.tbl_contains(vim.fn.getcompletion('Ru ec', 'cmdline'), 'echo'), true, ':Ru')
+end)
+
+test('every window showing the output follows it', function()
+    vim.cmd([[Run sleep 0.2; for i in 1 2 3; do echo line$i; sleep 0.1; done]])
+    focus_run()
+    vim.cmd('split')
+    wait_finished()
+    local wins = vim.fn.win_findbuf(run_buf())
+    eq(#wins, 2, 'window count')
+    for _, win in ipairs(wins) do
+        eq(vim.api.nvim_win_get_cursor(win)[1], vim.api.nvim_buf_line_count(run_buf()), 'cursor of window ' .. win)
+    end
+end)
+
+test('cursor movement, backspace, BEL and overwriting multibyte characters', function()
+    run([[printf 'abc\033[2Hxy\n\303\251t\303\251\rA\nabc\bX\na\007b\n']])
+    eq(out_lines()[4], 'xyc', 'one CUP parameter is a row')
+    eq(out_lines()[5], 'Até', 'carriage return overwrites characters')
+    eq(out_lines()[6], 'abX', 'backspace')
+    eq(out_lines()[7], 'ab', 'BEL')
+end)
+
+test('display columns on tab-indented lines', function()
+    -- GCC counts a tab as 8 display columns: x is column 13
+    run('echo tab.c:1:13')
+    jump_first()
+    eq(current_file(), dir .. '/tab.c', 'file')
+    eq(cursor(), { 1, 5 }, 'cursor')
+end)
+
+test('<C-c> kills the running command and k is not mapped', function()
+    vim.cmd('Run sleep 5')
+    vim.wait(100)
+    focus_run()
+    keys('<C-c>')
+    assert(vim.wait(2000, finished), 'command was not killed')
+    eq(vim.fn.maparg('k', 'n'), '', 'k mapping')
 end)
 
 -- ============================================================================

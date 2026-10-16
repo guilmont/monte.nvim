@@ -118,16 +118,16 @@ On first launch, `lazy.nvim` bootstraps itself and installs plugins automaticall
 |------|-----|--------|
 | `n` | `Enter` | Open selected file |
 | `n` | `d` | Diff selected file |
-| `n` | `r` | Revert selected file |
+| `n` | `r` | Revert selected file (an untracked file is deleted, after a y/N prompt) |
 | `n` | `s` | Toggle stage / unstage (based on the section the cursor is in) |
 | `n` | `a` | Stage all changes |
 | `n` | `A` | Unstage all changes |
-| `n` | `D` | Discard all changes and remove untracked files |
+| `n` | `D` | Discard all staged and unstaged changes and remove untracked files (y/N prompt) |
 | `n` | `c` | Commit staged changes |
-| `n` | `g` | Open `lazygit` |
+| `n` | `L` | Open `lazygit` |
 | `n` | `q` | Close Git window |
 
-Files are grouped into **Staged**, **Unstaged**, and **Untracked** sections with a colored status badge per file. Untracked directories are expanded to their individual files.
+Files are grouped into **Staged**, **Unstaged**, and **Untracked** sections with a colored status badge per file. Untracked directories are expanded to their individual files. `r` and `s` on a renamed file act on both the old and the new path. The window stays on the repository it was opened for, even if the current directory is in another repository; git errors are shown as notifications.
 
 #### Git diff view
 
@@ -137,7 +137,7 @@ Files are grouped into **Staged**, **Unstaged**, and **Untracked** sections with
 | `n` | `]` | Next hunk |
 | `n` | `r` | Revert current hunk from `HEAD` |
 | `n` | `q` | Close base/original side only |
-| `n` | `Q` | Close both diff windows |
+| `n` | `Q` | Close both diff windows (the file's buffer is kept if it has unsaved changes or was already open) |
 
 ### Perforce
 
@@ -162,14 +162,32 @@ Files are grouped into **Staged**, **Unstaged**, and **Untracked** sections with
 
 | Mode | Key | Action |
 |------|-----|--------|
-| `n` | `Enter` | Open file / edit CL / toggle shelf |
+| `n` | `Enter` | Open file / edit CL description / toggle shelf |
 | `n` | `d` | Diff selected file |
-| `n` | `r` | Revert file or changelist |
-| `n` | `m` | Move file to another changelist |
-| `n` | `s` | Shelve file or changelist |
-| `n` | `u` | Unshelve file or changelist |
-| `n` | `D` | Delete file, shelf, or changelist |
+| `n` `v` | `r` | Revert file(s), or the whole changelist on its header |
+| `n` `v` | `m` | Move file(s) to another changelist |
+| `n` `v` | `s` | Shelve file(s), or the whole changelist on its header |
+| `n` `v` | `u` | Unshelve file(s), or the whole shelf on its line |
+| `n` `v` | `D` | Make file(s) gone (see below), or delete a shelf / changelist |
+| `n` `v` | `S` | Sync file(s) |
+| `n` `v` | `R` | Resolve file(s) |
+| `n` | `n` | New changelist |
 | `n` | `q` | Close Perforce window |
+
+Changelists are listed default first, then by number. In visual mode, actions apply to the selected files; a changelist header or shelf line inside the selection stands for all of its files.
+
+`D` on an opened file makes it gone, whatever its state, after a prompt that says what will happen (local changes are discarded):
+
+| Opened as | `D` does |
+|-----------|----------|
+| edit, integrate | revert, then mark for delete in the same changelist |
+| add, branch | revert and remove the local file |
+| move/add | undo the move, then mark the original for delete |
+| delete, move/delete | nothing (already marked for delete) |
+
+This also works for files in the default changelist. Deleting the default changelist itself isn't allowed.
+
+Other notes: `:P4Add` passes `-f` for file names containing `@#%*`. `:P4Rename` and the merge resolve refuse buffers with unsaved changes. The merge resolve (`R` → Merge) needs `diff3` on `PATH`.
 
 #### Perforce diff view
 
@@ -179,7 +197,7 @@ Files are grouped into **Staged**, **Unstaged**, and **Untracked** sections with
 | `n` | `]` | Next hunk |
 | `n` | `r` | Revert current hunk from depot |
 | `n` | `q` | Close base/original side only |
-| `n` | `Q` | Close both diff windows |
+| `n` | `Q` | Close both diff windows (the file's buffer is kept if it has unsaved changes or was already open) |
 
 ### Command runner
 
@@ -197,8 +215,10 @@ Files are grouped into **Staged**, **Unstaged**, and **Untracked** sections with
 | `n` | `[` | Previous parsed location |
 | `n` | `]` | Next parsed location |
 | `n` | `r` | Re-run last command |
-| `n` | `k` | Kill running command |
-| `n` | `q` | Close output window |
+| `n` | `Ctrl+c` | Kill running command |
+| `n` | `q` | Close output window (also kills a running command) |
+
+On Unix, commands run in a pty with `PAGER`, `GIT_PAGER` and `MANPAGER` set to `cat`, so `git log` or `man` don't wait for a pager. Locations are recognized when they start a word: `file:line[:col]`, `file(line[,col])`, optionally wrapped in quotes or brackets.
 
 ### Alignment
 
@@ -206,7 +226,7 @@ Files are grouped into **Staged**, **Unstaged**, and **Untracked** sections with
 |------|-----|--------|
 | - | `:'<,'>Align <pattern>` | Align selected lines by vim regexp |
 
-Aligns the first match of the pattern to the same column across all selected lines. Lines without a match are left untouched. Uses vim regexp syntax.
+Aligns the first match of the pattern to the same column across all selected lines. Lines without a match are left untouched. Uses vim regexp syntax. Columns are display columns, so tabs and wide characters line up, and a line where only indentation precedes the match keeps its indentation.
 
 ## Project structure
 

@@ -22,29 +22,110 @@ function M.find_buffer_by_name(name)
 end
 
 -- Normalize a file path for comparison (separators, and case on Windows).
-local function normalize_path(p)
+function M.normalize_path(p)
     p = vim.fs.normalize(p)
     return M.is_windows and p:lower() or p
 end
 
--- Find buffer ID whose full file path exactly matches the given absolute path, or nil.
+-- Absolute, symlink-free, normalized spelling of a path.
+local function canonical_path(p)
+    return M.normalize_path(vim.fn.resolve(vim.fn.fnamemodify(p, ':p')))
+end
+
+local function is_symlink(p)
+    local stat = vim.uv.fs_lstat(p)
+    return stat ~= nil and stat.type == 'link'
+end
+
+-- Find the buffer holding a file, however its name was spelled (relative,
+-- symlinks, separators, case on Windows), or nil. The current buffer is checked first.
 function M.find_buffer_by_path(path)
-    local target = normalize_path(path)
+    local target = canonical_path(path)
+    local current = vim.api.nvim_get_current_buf()
+    local current_name = vim.api.nvim_buf_get_name(current)
+    if current_name ~= '' and canonical_path(current_name) == target then
+        return current
+    end
+    -- resolve() hits the file system, so only resolve buffers that can be the file:
+    -- the same last component as the path (as given or resolved), or a symlink.
+    local basenames = {
+        [vim.fs.basename(M.normalize_path(path))] = true,
+        [vim.fs.basename(target)] = true,
+    }
     for _, bufnr in ipairs(vim.api.nvim_list_bufs()) do
-        local buf_name = vim.api.nvim_buf_get_name(bufnr)
-        if buf_name ~= '' and normalize_path(buf_name) == target then
+        local name = vim.api.nvim_buf_get_name(bufnr)
+        if bufnr ~= current and name ~= ''
+            and (basenames[vim.fs.basename(M.normalize_path(name))] or is_symlink(name))
+            and canonical_path(name) == target then
             return bufnr
         end
     end
     return nil
 end
 
+-- A buffer that holds work or is in view: never wiped to free its name.
+local function is_buffer_in_use(bufnr)
+    return vim.bo[bufnr].modified
+        or M.is_buffer_displayed(bufnr)
+        or (vim.bo[bufnr].buftype == 'terminal' and vim.api.nvim_buf_is_loaded(bufnr))
+end
+
+-- Free a buffer name for a new buffer by wiping the buffer holding it, such as an
+-- unloaded one left by :bdelete or a stale hidden one. A buffer that is modified,
+-- shown in a window (any tab) or a loaded terminal is left alone. Scratch
+-- (buftype=nofile) buffers never count as modified, so a hidden one is wiped.
+-- Returns true when no buffer holds the name anymore.
+function M.release_buffer_name(name)
+    -- Neovim stores names as full paths ('Git Window' -> '<cwd>/Git Window')
+    local full = M.normalize_path(vim.fn.fnamemodify(name, ':p'))
+    for _, bufnr in ipairs(vim.api.nvim_list_bufs()) do
+        local buf_name = vim.api.nvim_buf_get_name(bufnr)
+        if buf_name ~= '' and M.normalize_path(buf_name) == full then
+            if is_buffer_in_use(bufnr) then
+                return false
+            end
+            return (pcall(vim.api.nvim_buf_delete, bufnr, { force = true }))
+        end
+    end
+    return true
+end
+
 -- Create a new scratch buffer with a given name and return its ID.
+-- A leftover buffer with that name is wiped first (see release_buffer_name);
+-- errors if the name belongs to a buffer still in use.
 function M.create_scratch_buffer(name, modifiable)
+    if not M.release_buffer_name(name) then
+        error('Buffer "' .. name .. '" is already open', 0)
+    end
     local bufnr = vim.api.nvim_create_buf(true, true)
     vim.api.nvim_buf_set_name(bufnr, name)
     vim.bo[bufnr].modifiable = modifiable
     return bufnr
+end
+
+-- Return cached_bufnr if it is still valid and loaded, otherwise a new scratch
+-- buffer from create_scratch_buffer (same errors). The second result is true when
+-- the buffer was just created, so the caller sets up its maps and highlighting.
+function M.get_or_create_scratch_buffer(name, cached_bufnr, modifiable)
+    if cached_bufnr and M.is_buffer_valid(cached_bufnr) then
+        return cached_bufnr, false
+    end
+    return M.create_scratch_buffer(name, modifiable), true
+end
+
+-- Delete the buffers of files that are no longer on disk, so they don't keep
+-- looking like normal files, then :checktime the rest. Modified buffers are kept
+-- (checktime warns about them).
+function M.drop_buffers_of_missing_files(paths)
+    for _, path in ipairs(paths) do
+        if path ~= '' and not vim.uv.fs_stat(path) then
+            local bufnr = M.find_buffer_by_path(path)
+            if bufnr and not vim.bo[bufnr].modified then
+                pcall(vim.api.nvim_buf_delete, bufnr, { force = true })
+            end
+        end
+    end
+    vim.cmd('checktime')
 end
 
 -- Check if a buffer is valid and loaded.
@@ -124,9 +205,10 @@ local function is_neotree_window(winid)
     return vim.bo[bufnr].filetype == 'neo-tree'
 end
 
-local function count_real_windows()
+-- Count real (non-floating, non-Neo-tree) windows in a tabpage (0 = current).
+local function count_real_windows(tabpage)
     local count = 0
-    for _, winid in ipairs(vim.api.nvim_list_wins()) do
+    for _, winid in ipairs(vim.api.nvim_tabpage_list_wins(tabpage or 0)) do
         if M.is_window_valid(winid) and not is_floating_window(winid) and not is_neotree_window(winid) then
             count = count + 1
         end
@@ -134,7 +216,8 @@ local function count_real_windows()
     return count
 end
 
--- Check if a buffer is displayed in any window.
+-- Check if a buffer is displayed in any window, in any tabpage.
+-- Callers use this to decide whether a buffer can be deleted, so it stays global.
 function M.is_buffer_displayed(bufnr)
     local windows = vim.api.nvim_list_wins()
     for _, win in ipairs(windows) do
@@ -202,9 +285,10 @@ end
 -- Window utilities
 -- ========================================================================
 
--- Detect window containing the initial empty buffer and return Id, otherwise nil.
+-- Detect window in the current tabpage containing the initial empty buffer and
+-- return Id, otherwise nil.
 function M.find_empty_buffer_window()
-    for _, win in ipairs(vim.api.nvim_list_wins()) do
+    for _, win in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
         local buf = vim.api.nvim_win_get_buf(win)
         if is_empty_normal_buffer(buf) then
             return win
@@ -231,21 +315,25 @@ function M.create_window_for_buffer(bufnr)
     return winid
 end
 
--- Find window by buffer number and return its ID.
-function M.find_window_by_buffer(bufnr)
-    local windows = vim.api.nvim_list_wins()
+local function find_window_in(windows, bufnr)
     for _, win in ipairs(windows) do
-        local win_bufnr = vim.api.nvim_win_get_buf(win)
-        if win_bufnr == bufnr then
+        if vim.api.nvim_win_get_buf(win) == bufnr then
             return win
         end
     end
     return nil
 end
 
--- Find another real window to reuse, excluding the provided window ID.
+-- Find window by buffer number and return its ID.
+-- Prefers a window in the current tabpage, then falls back to other tabpages.
+function M.find_window_by_buffer(bufnr)
+    return find_window_in(vim.api.nvim_tabpage_list_wins(0), bufnr)
+        or find_window_in(vim.api.nvim_list_wins(), bufnr)
+end
+
+-- Find another real window in the current tabpage to reuse, excluding the provided window ID.
 function M.find_alternate_real_window(excluded_winid)
-    for _, winid in ipairs(vim.api.nvim_list_wins()) do
+    for _, winid in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
         if M.is_window_valid(winid)
             and winid ~= excluded_winid
             and not is_floating_window(winid)
@@ -261,11 +349,11 @@ function M.is_window_valid(winid)
     return vim.api.nvim_win_is_valid(winid)
 end
 
--- Close all windows except Neo-tree.
+-- Close all windows in the current tabpage except Neo-tree.
 -- Returns one surviving real window to reuse, or nil.
 function M.close_other_windows()
     local target_win
-    for _, winid in ipairs(vim.api.nvim_list_wins()) do
+    for _, winid in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
         if M.is_window_valid(winid) then
             if is_neotree_window(winid) then
                 -- keep
@@ -279,9 +367,9 @@ function M.close_other_windows()
     return target_win
 end
 
--- Reuse or create a window to given buffer.
+-- Reuse a window in the current tabpage showing the given buffer, or create one.
 function M.reuse_or_create_window_for_buffer(bufnr)
-    local winid = M.find_window_by_buffer(bufnr)
+    local winid = find_window_in(vim.api.nvim_tabpage_list_wins(0), bufnr)
     if winid and M.is_window_valid(winid) then
         vim.api.nvim_win_set_buf(winid, bufnr)
         M.set_current_window(winid)
@@ -307,7 +395,7 @@ function M.dismiss_buffer_window(winid, bufnr)
         return
     end
 
-    if count_real_windows() > 1 then
+    if count_real_windows(vim.api.nvim_win_get_tabpage(winid)) > 1 then
         M.close_window(winid)
         if bufnr and vim.api.nvim_buf_is_valid(bufnr) and not M.is_buffer_displayed(bufnr) then
             pcall(vim.api.nvim_buf_delete, bufnr, { force = true })
@@ -380,6 +468,24 @@ function M.set_cursor_position(winid, line, column)
     line = math.max(1, math.min(line, line_count))
     -- Set the cursor position in the specified window.
     vim.api.nvim_win_set_cursor(winid, { line, column })
+end
+
+-- ========================================================================
+-- User interaction
+-- ========================================================================
+
+-- Ask a y/N question; on_yes runs only when the answer is y or Y.
+function M.confirm(prompt, on_yes)
+    vim.ui.input({ prompt = prompt }, function(input)
+        if input and input:lower() == 'y' then
+            on_yes()
+        end
+    end)
+end
+
+-- Show an error, e.g. one caught with pcall: notify_error('Git: ', err).
+function M.notify_error(prefix, err)
+    vim.notify(prefix .. vim.trim(tostring(err)), vim.log.levels.ERROR)
 end
 
 return M
