@@ -235,6 +235,18 @@ test(':bdelete of the output buffer during a run', function()
     eq(out_lines()[4], 'fresh', 'next run output')
 end)
 
+test('re-running after :bdelete of the output in another directory', function()
+    -- The :bdelete-d buffer keeps its old full path, so creating the next output
+    -- buffer doesn't free its name; later runs must reuse the live buffer
+    vim.cmd('cd ' .. vim.fn.fnameescape(dir .. '/my dir'))
+    run('echo first')
+    vim.cmd('bdelete! ' .. run_buf())
+    vim.cmd('cd ' .. vim.fn.fnameescape(dir))
+    run('echo second')
+    run('echo third')
+    eq(out_lines()[4], 'third', 'output of the last run')
+end)
+
 test('a 50 KB line without spaces does not freeze the editor', function()
     local start = vim.uv.hrtime()
     run([[printf '%050000d foo.c:2\n' 0]])

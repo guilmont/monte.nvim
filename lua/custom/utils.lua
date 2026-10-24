@@ -12,13 +12,19 @@ M.is_windows = vim.fn.has('win32') == 1
 -- Find buffer ID by name and return its ID.
 -- Neovim expands scratch buffer names to full paths (e.g. '<cwd>/Git Window'),
 -- so the name is compared against the last path component, not as a substring.
+-- A loaded buffer wins over an unloaded one (eg. left by :bdelete before a :cd,
+-- which keeps its old full path), so callers reuse the live buffer.
 function M.find_buffer_by_name(name)
+    local unloaded = nil
     for _, bufnr in ipairs(vim.api.nvim_list_bufs()) do
         if vim.fs.basename(vim.api.nvim_buf_get_name(bufnr)) == name then
-            return bufnr
+            if vim.api.nvim_buf_is_loaded(bufnr) then
+                return bufnr
+            end
+            unloaded = unloaded or bufnr
         end
     end
-    return nil
+    return unloaded
 end
 
 -- Normalize a file path for comparison (separators, and case on Windows).
